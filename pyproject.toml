@@ -1,0 +1,32 @@
+[project]
+name = "ragwithcoldapidocument"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.14"
+dependencies = [
+    "dashscope>=1.26.4",
+    "fastapi>=0.115",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2,<3",
+    "pymongo>=4.14,<5",
+    "pyyaml>=6.0.3",
+    "rank-bm25>=0.2.2",
+    "sentence-transformers>=5.6.1",
+    "sqlmodel>=0.0.39",
+    "uvicorn>=0.32",
+    "zvec>=0.6.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+]
+
+[tool.pytest.ini_options]
+# 默认只跑 unit；integration / benchmark 需要各自显式指定
+testpaths = ["tests/unit"]
+asyncio_mode = "auto"
+addopts = [
+    "-ra",
+]

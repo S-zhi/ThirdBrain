@@ -1,0 +1,59 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ===== Virtual envs / package managers =====
+.venv/
+venv/
+ENV/
+env/
+.uv-cache/
+
+# ===== Test / coverage =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.cache
+coverage.xml
+
+# ===== IDE =====
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ===== Local env / secrets =====
+.env
+.env.*
+!.env.example
+
+# ===== Local MongoDB data dirs =====
+mongo-data/
+mongodb-data/
+*.db
+
+# ===== Zvec collection data (local dev) =====
+data/zvec_collections/
+
+# ===== Smoke test / e2e scratch =====
+tmp/e2e_zvec_data/
+tmp/crud_test_data/
+
+# ===== MongoDB binary checkout (vendored) =====
+# Keep mongodb-macos-aarch64--* in repo? If yes, comment out the next line.
+mongodb-macos-aarch64--*/
+/ingest/
+API参考/
+data/
+docs/
