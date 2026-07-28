@@ -1,11 +1,11 @@
 """向量生成：Embedder ABC + Bailian（云） + Local（本地）。
 
 设计要点：
-- ``BailianEmbedder``：dense 走百炼 DashScope API，sparse 复用本地 TF-IDF。
+- ``BailianEmbedder``：dense / sparse 均走 Zvec 官方 Qwen DashScope 封装。
 - ``LocalEmbedder``：dense 走 sentence-transformers，sparse 也走本地 TF-IDF。
 - ``TFIDFSparseEncoder``：无 jieba 依赖的稀疏编码器（中文用 2-gram 字符切分）。
-- 2560 维目前是用户指定的预期值；DashScope v3/v4 合法维度为
-  ``[2048, 1536, 1024, 768, 512, 256, 128, 64]``，跑不起来就是模型/维度不匹配。
+- 2048 维是当前生产配置；DashScope v3/v4 合法维度为
+  ``[2048, 1536, 1024, 768, 512, 256, 128, 64]``。
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class Embedder(ABC):
     - 可选 :meth:`fit_sparse`：用一批语料预训练 sparse encoder（默认 no-op）。
 
     :class:`BailianEmbedder` 和 :class:`LocalEmbedder` 是两个实现：
-    - Bailian: dense 走 DashScope（云），sparse 复用本地 TF-IDF。
+    - Bailian: dense / sparse 均走 Zvec 官方 Qwen DashScope 封装。
     - Local: dense 走 sentence-transformers（本地），sparse 复用本地 TF-IDF。
     """
 
@@ -76,7 +76,6 @@ class Embedder(ABC):
         默认 no-op；子类（用 TF-IDF 的）可 override 提升召回质量。
         """
         # no-op by default
-        pass
 
     @abstractmethod
     def close(self) -> None:
@@ -229,14 +228,7 @@ class TFIDFSparseEncoder:
 # ---------------------------------------------------------------------------
 
 class BailianEmbedder(Embedder):
-    """dense 走 DashScope（云），sparse 复用本地 :class:`TFIDFSparseEncoder`。
-
-    必需环境变量：``DASHSCOPE_API_KEY``（在构造时立刻读，缺失就抛
-    :class:`ConfigError`，**不**延迟到第一次 embed）。
-
-    模型维度契约：DashScope v3/v4 合法 dimension = ``[2048, 1536, 1024, 768,
-    512, 256, 128, 64]``；本项目目前固定 2560，跑不起来就是 model/维度不匹配。
-    """
+    """通过 Zvec 官方 Qwen 封装生成 DashScope dense / sparse 向量。"""
 
     def __init__(
         self,
@@ -245,118 +237,56 @@ class BailianEmbedder(Embedder):
         max_retries: int = 3,
         timeout: int = 30,
     ) -> None:
-        """构造：校验环境变量 + 懒加载 dashscope。
-
-        Args:
-            model: DashScope 模型名（默认 ``qwen3.7-text-embedding``，见
-                :class:`BailianConfig`）。
-            dimension: 期望维度。
-            max_retries: 5xx / 网络层重试上限。
-            timeout: 单次 HTTP 超时秒（**注意**：当前实现**没有**把这个
-                timeout 透传给 dashscope SDK，dashscope 内部用默认超时；这是个
-                已知的待修点，调用方别依赖这个值生效）。
-
-        Raises:
-            ConfigError: :data:`ENV_DASHSCOPE_API_KEY` 缺失。
-            EmbedderError: dashscope 模块未安装。
-        """
+        """构造 query/document 两组官方 Qwen dense / sparse embedding 函数。"""
         self._model = model
         self._dim = dimension
         self._max_retries = max_retries
         self._timeout = timeout
-        self._api_key = get_dashscope_api_key()  # 这里就抛 ConfigError，不要延迟到 embed 时
-        self._sparse = TFIDFSparseEncoder()
+        api_key = get_dashscope_api_key()
 
-        # DashScope 是懒加载 import（避免顶级依赖失败时整个模块挂掉）
         try:
-            import dashscope  # type: ignore
-            from dashscope import TextEmbedding  # type: ignore
-            self._dashscope = dashscope
-            self._TextEmbedding = TextEmbedding
-        except ImportError as e:
-            raise EmbedderError(
-                "dashscope 未安装；pip install dashscope 后再试"
-            ) from e
+            from zvec import QwenDenseEmbedding, QwenSparseEmbedding
+
+            self._dense = {
+                mode: QwenDenseEmbedding(
+                    dimension=dimension,
+                    model=model,
+                    api_key=api_key,
+                    text_type=mode,
+                )
+                for mode in ("query", "document")
+            }
+            self._sparse = {
+                mode: QwenSparseEmbedding(
+                    dimension=dimension,
+                    model=model,
+                    api_key=api_key,
+                    encoding_type=mode,
+                )
+                for mode in ("query", "document")
+            }
+        except (ImportError, TypeError, ValueError) as e:
+            raise EmbedderError(f"Zvec Qwen embedding 初始化失败: {e}") from e
 
     def embed_dense(self, text: str, mode: Mode = "document") -> list[float]:
-        """调 DashScope 生成 dense 向量。
-
-        重试 / 错误处理策略：
-        - 4xx（请求本身错）→ **立即**抛 :class:`EmbedderError`，不重试。
-          消息格式：``"Bailian API 4xx 错误 [N]: {message}"``。
-        - 5xx / 网络层异常 / 未知状态码 / ``status_code`` 缺失 → 重试
-          ``max_retries`` 次。消息格式：``"Bailian API 5xx 错误 [N]: {message}"``
-          （"5xx"是**类标记**，覆盖 status=None / 0 / 3xx / 未知码等所有
-          "可重试但非 4xx"的情况；这样 ops dashboard 可以统一 grep
-          ``"Bailian API 4xx"`` / ``"Bailian API 5xx"`` 做告警分桶）。
-        - 返回的 vector 维度与 :attr:`_dim` 不匹配 → :class:`EmbedderError`。
-        - 重试耗尽 → 抛 :class:`EmbedderError`（消息带"重试 N 次"）。
-
-        Args:
-            text: 输入文本。
-            mode: ``"query"`` / ``"document"``，DashScope 用作内部 prompt prefix。
-
-        Returns:
-            list[float]，长度 = :attr:`_dim`。
-
-        Raises:
-            EmbedderError: 4xx / 维度不匹配 / 重试耗尽。
-        """
-        last_err: Exception | None = None
-        for attempt in range(self._max_retries):
-            try:
-                resp = self._TextEmbedding.call(
-                    model=self._model,
-                    input=text,
-                    api_key=self._api_key,
-                    text_type=mode,  # "query" or "document"
-                    dimension=self._dim,
-                )
-                status = getattr(resp, "status_code", None)
-                if status == 200:
-                    vec = resp.output["embeddings"][0]["embedding"]
-                    if len(vec) != self._dim:
-                        raise EmbedderError(
-                            f"Bailian 返回维度 {len(vec)}，与配置的 {self._dim} 不匹配。"
-                            f"请检查模型 {self._model} 是否支持 {self._dim} 维。"
-                        )
-                    return vec
-                # 4xx 不重试（请求本身有问题，重试也白搭）
-                if isinstance(status, int) and 400 <= status < 500:
-                    raise EmbedderError(
-                        f"Bailian API 4xx 错误 [{status}]: {resp.message}"
-                    )
-                # 5xx 或任何"非 200 / 非 4xx"状态（如 0=网络未通、3xx=重定向、未知码、
-                # status 缺失/None）：全部按"可重试"处理。消息统一带 "5xx" 标记，
-                # 让 ops dashboard 能 grep "Bailian API 5xx" 统一告警分桶。
-                last_err = EmbedderError(
-                    f"Bailian API 5xx 错误 [{status}]: {resp.message}"
-                )
-            except EmbedderError:
-                raise
-            except Exception as e:  # 网络/超时
-                last_err = e
-        raise EmbedderError(
-            f"Bailian embed_dense 失败（重试 {self._max_retries} 次）: {last_err}"
-        )
+        """调用对应 mode 的 Zvec QwenDenseEmbedding 生成稠密向量。"""
+        try:
+            return self._dense[mode].embed(text)
+        except (TypeError, ValueError, RuntimeError) as e:
+            raise EmbedderError(f"Qwen dense embedding 失败: {e}") from e
 
     def embed_sparse(self, text: str, mode: Mode = "document") -> dict[int, float]:
-        """直接走本地 TF-IDF（DashScope 不提供 sparse 服务）。"""
-        return self._sparse.encode(text)
+        """调用对应 mode 的 Zvec QwenSparseEmbedding 生成稀疏向量。"""
+        try:
+            return self._sparse[mode].embed(text)
+        except (TypeError, ValueError, RuntimeError) as e:
+            raise EmbedderError(f"Qwen sparse embedding 失败: {e}") from e
 
     def fit_sparse(self, corpus: list[str]) -> None:
-        """用一批语料预训练 TF-IDF。"""
-        self._sparse.fit(corpus)
+        """Qwen sparse 无需本地拟合，保留 no-op 以兼容统一接口。"""
 
     def close(self) -> None:
-        """释放资源。当前 dashscope SDK 是 stateless HTTP client，无连接要关。"""
-        # dashscope 没有持久连接要关
-        pass
-
-    @property
-    def sparse_encoder(self) -> TFIDFSparseEncoder:
-        """暴露内部 TF-IDF，方便测试 / 调试。"""
-        return self._sparse
+        """释放资源；Zvec Qwen embedding 函数不持有需关闭的连接。"""
 
 
 # ---------------------------------------------------------------------------

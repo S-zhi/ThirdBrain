@@ -131,6 +131,11 @@ class TestExtractSignature:
         orm = FakeORM(body_md="# Title\n\nNo function section here")
         assert extract_signature(orm) == ""
 
+    def test_empty_function_section_does_not_capture_parameters(self):
+        """函数原型为空时不得跨章节抓取参数说明。"""
+        orm = FakeORM(body_md="#### 函数原型\n\n#### 参数说明\n\n无")
+        assert extract_signature(orm) == ""
+
 
 class TestFromOrm:
     def test_basic(self, sample_orm, isolated_config):

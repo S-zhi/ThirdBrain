@@ -164,7 +164,7 @@ class TestBuildEmbedder:
         MockBailian.assert_called_once()
         kwargs = MockBailian.call_args.kwargs
         assert kwargs["model"] == "qwen3.7-text-embedding"
-        assert kwargs["dimension"] == 2560
+        assert kwargs["dimension"] == 2048
         assert kwargs["max_retries"] == 2
 
     def test_local_uses_config(self, use_tmp_config):

@@ -89,6 +89,11 @@ class MongoDatabase:
         """状态集合名（来自 :attr:`MongoSettings.state_collection`）。"""
         return self._settings.state_collection
 
+    @property
+    def query_record_collection_name(self) -> str:
+        """查询记录集合名（来自 MongoSettings.query_record_collection）。"""
+        return self._settings.query_record_collection
+
     # ---- 生命周期 ----
 
     async def connect(self) -> None:
@@ -185,3 +190,11 @@ class MongoDatabase:
     def state_collection(self) -> Any:
         """获取 lig_text_states Collection 句柄（懒创建，不存在不会自动建）。"""
         return self.db[self._settings.state_collection]
+
+    def query_record_collection(self) -> Any:
+        """获取 Agent 查询记录 Collection 句柄。"""
+        return self.db[self._settings.query_record_collection]
+
+    def collection(self, name: str) -> Any:
+        """获取调用方指定的业务 Collection 句柄。"""
+        return self.db[name]

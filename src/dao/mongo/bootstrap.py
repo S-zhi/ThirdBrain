@@ -118,6 +118,35 @@ STATE_INDEXES: list[dict[str, Any]] = [
 ]
 
 
+#: agent_query_records 的审计与风险回归索引定义。
+QUERY_RECORD_INDEXES: list[dict[str, Any]] = [
+    {
+        "name": "uq_agent_query_record_id",
+        "key": [("query_record_id", ASCENDING)],
+        "options": {"unique": True, "name": "uq_agent_query_record_id"},
+    },
+    {
+        "name": "ix_agent_query_request_timeline",
+        "key": [("request_id", ASCENDING), ("started_at", DESCENDING)],
+        "options": {"name": "ix_agent_query_request_timeline"},
+    },
+    {
+        "name": "ix_agent_query_batch_item",
+        "key": [("batch_id", ASCENDING), ("custom_id", ASCENDING)],
+        "options": {"sparse": True, "name": "ix_agent_query_batch_item"},
+    },
+    {
+        "name": "ix_agent_query_scope_timeline",
+        "key": [
+            ("filters.namespace", ASCENDING),
+            ("filters.version", ASCENDING),
+            ("started_at", DESCENDING),
+        ],
+        "options": {"name": "ix_agent_query_scope_timeline"},
+    },
+]
+
+
 class MongoBootstrap:
     """初始化 MongoDB Collection、验证规则和索引。
 
@@ -158,13 +187,19 @@ class MongoBootstrap:
         # auto：创建缺失集合 + 索引。
         await self._create_collection_if_missing(self._mongo.record_collection_name)
         await self._create_collection_if_missing(self._mongo.state_collection_name)
+        await self._create_collection_if_missing(self._mongo.query_record_collection_name)
         await self._create_indexes(self._mongo.record_collection_name, RECORD_INDEXES)
         await self._create_indexes(self._mongo.state_collection_name, STATE_INDEXES)
+        await self._create_indexes(
+            self._mongo.query_record_collection_name,
+            QUERY_RECORD_INDEXES,
+        )
         logger.info(
-            "mongo.bootstrap.ok database=%s record=%s state=%s",
+            "mongo.bootstrap.ok database=%s record=%s state=%s query_record=%s",
             self._mongo.settings.database,
             self._mongo.record_collection_name,
             self._mongo.state_collection_name,
+            self._mongo.query_record_collection_name,
         )
 
     # ---- 内部 ----
@@ -391,6 +426,7 @@ class MongoBootstrap:
         for name in (
             self._mongo.record_collection_name,
             self._mongo.state_collection_name,
+            self._mongo.query_record_collection_name,
         ):
             if name not in existing_names:
                 raise RuntimeError(
@@ -399,6 +435,10 @@ class MongoBootstrap:
                 )
         await self._validate_indexes(self._mongo.record_collection_name, RECORD_INDEXES)
         await self._validate_indexes(self._mongo.state_collection_name, STATE_INDEXES)
+        await self._validate_indexes(
+            self._mongo.query_record_collection_name,
+            QUERY_RECORD_INDEXES,
+        )
         logger.info("mongo.bootstrap.validate_ok")
 
     async def _validate_indexes(

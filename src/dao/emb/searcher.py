@@ -1,4 +1,4 @@
-"""检索层：SearchQuery / SearchResult + search() + search_by_name() + RRF。
+"""检索层：精确名称、dense 语义与历史 hybrid 检索实现。
 
 设计：
 - 编排 dense + sparse 双路召回，在 Python 端用 RRF（k=60）合流。
@@ -120,6 +120,19 @@ def _build_filter(q: SearchQuery) -> str | None:
     return " AND ".join(parts)
 
 
+def _require_versioned_scope(query: SearchQuery) -> None:
+    """校验查询必须限定 namespace 与 version，禁止跨域召回。"""
+    if not query.namespace or not query.namespace.strip():
+        raise SearchError("query.namespace 不能为空")
+    if not query.version or not query.version.strip():
+        raise SearchError("query.version 不能为空")
+
+
+def _join_filters(*parts: str | None) -> str:
+    """以 AND 连接非空 Zvec 过滤条件。"""
+    return " AND ".join(part for part in parts if part)
+
+
 # ---------------------------------------------------------------------------
 # RRF（纯函数，从 searcher 里独立出来方便单测）
 # ---------------------------------------------------------------------------
@@ -204,6 +217,55 @@ def search_by_name(
 
     # 再试 api_id（用户可能输入完整 chunk_id）
     raw = coll.query(filter=f"{FIELD_API_ID} = '{_esc(name)}'", topk=topk)
+    return _to_results(raw)
+
+
+def search_exact_name(
+    coll: zvec.Collection,
+    query: SearchQuery,
+) -> list[SearchResult]:
+    """在强制版本范围内按 name 或完整 api_id 做单路精确查询。"""
+    if not query.text or not query.text.strip():
+        raise SearchError("query.text 不能为空")
+    _require_versioned_scope(query)
+
+    text = query.text.strip()
+    identity_field = FIELD_API_ID if "." in text else FIELD_NAME
+    identity_filter = f"{identity_field} = '{_esc(text)}'"
+    flt = _join_filters(identity_filter, _build_filter(query))
+    try:
+        raw = coll.query(filter=flt, topk=query.topk)
+    except Exception as error:
+        raise SearchError(f"名称精确查询失败: {error}") from error
+    return _to_results(raw)
+
+
+def search_dense(
+    coll: zvec.Collection,
+    query: SearchQuery,
+    embedder: Embedder,
+) -> list[SearchResult]:
+    """在强制版本范围内仅执行 dense 语义召回。"""
+    if not query.text or not query.text.strip():
+        raise SearchError("query.text 不能为空")
+    _require_versioned_scope(query)
+
+    try:
+        dense_vector = embedder.embed_dense(query.text, mode="query")
+    except Exception as error:
+        raise SearchError(f"query embed 失败: {error}") from error
+
+    try:
+        raw = coll.query(
+            queries=zvec.Query(
+                field_name=FIELD_DENSE_EMBEDDING,
+                vector=dense_vector,
+            ),
+            filter=_build_filter(query),
+            topk=query.topk,
+        )
+    except Exception as error:
+        raise SearchError(f"dense 召回失败: {error}") from error
     return _to_results(raw)
 
 

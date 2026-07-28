@@ -11,7 +11,7 @@ class TestLoadConfig:
         c = cfg.load_config(isolated_config)
         assert c.embedder.type == "local"
         assert c.embedder.local.dimension == 384
-        assert c.embedder.bailian.dimension == 2560  # 模板给的
+        assert c.embedder.bailian.dimension == 2048  # 模板给的
         assert c.zvec.default_collection == "unit_test"
         assert "{name} {namespace} " in c.api_name.strip_pattern
 

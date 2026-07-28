@@ -25,7 +25,7 @@
 
 - 这里读的是**项目根** ``config.yaml``，所以 ``bailian.model`` 和
   ``bailian.dimension`` 都按你配置的来。如果你配的 model/dim 在百炼那边不合法
-  （比如 ``dimension: 2560`` 对 v3/v4 都不合法），这条测试会真实地爆错——这正是
+  （比如填入不受模型支持的 dimension），这条测试会真实地爆错——这正是
   我们想要的反馈。
 """
 

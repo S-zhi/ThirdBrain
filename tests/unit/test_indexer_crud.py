@@ -1,6 +1,7 @@
 """indexer CRUD 集成测试（用真实 Zvec collection，跳过 embedder）。"""
 import gc
 import shutil
+from types import SimpleNamespace
 
 import pytest
 import zvec
@@ -8,31 +9,38 @@ import zvec
 import config as cfg
 from src.dao.emb import (
     CollectionNotFoundError,
+    CollectionSession,
+    DirectorDoc,
     NotSupportedError,
     SchemaMismatchError,
     collection_path,
+    count,
     count_docs,
+    delete,
     delete_batch,
     delete_doc,
+    delete_many,
+    fetch,
     fetch_batch,
     fetch_doc,
+    insert,
+    insert_many,
     list_ids,
     open_collection,
     open_or_create_collection,
-    upsert_batch,
+    update,
     update_batch,
     update_doc,
+    update_many,
 )
 from src.dao.emb.schema import (
     FIELD_DENSE_EMBEDDING,
     FIELD_SPARSE_EMBEDDING,
-    get_collection_schema,
 )
 
 
 def make_doc(doc_id: str, **overrides) -> zvec.Doc:
     """造一条 schema 兼容的 zvec.Doc。dense 维度从 config 读，避免硬编码。"""
-    import config as cfg
     c = cfg.get_config()
     if c.embedder.type == "bailian":
         dim = c.embedder.bailian.dimension
@@ -480,7 +488,6 @@ class TestUpdate:
     def test_update_nonexistent(self, collection):
         # zvec 的 update 对不存在的 id 行为：返回 error status（不抛异常）
         # 我们只验证不崩
-        from src.dao.emb import upsert_doc
         # 先确保 collection 里有 a
         collection.upsert(make_doc("a"))
         # 试着更新不存在的 id（zvec 0.6 应该不抛）
@@ -519,9 +526,9 @@ class TestDelete:
         assert count_docs(collection) == 1  # 实际只剩 c
 
 
-class TestUpsertBatch:
-    def test_upsert_batch_returns_stats(self, collection):
-        # 这里用 _FakeEmbedder 不行——upsert_batch 内部调 embedder
+class TestInsertBatch:
+    def test_insert_batch_returns_stats(self, collection):
+        # 这里用 _FakeEmbedder 不行——insert_batch 内部调 embedder
         # 所以走直接 zvec.upsert 验证 coll 行为
         collection.upsert(make_doc("a"))
         collection.upsert(make_doc("b"))
@@ -541,3 +548,273 @@ class TestCollectionPath:
         path = collection_path("my_coll")
         assert path.endswith("my_coll")
         assert "zvec_data" in path or "unit_test" in path  # base path components
+
+
+# ---------------------------------------------------------------------------
+# 下面是新加的高层 CRUD 测试（DirectorDoc + CollectionSession + 传 collection 名）
+# ---------------------------------------------------------------------------
+
+class _FakeEmbedder:
+    """不走真实 embed；返回与 config 维度匹配的 dense + sparse。
+
+    维度从 config 读，跟 make_doc 一致；避免硬编码 2560/384。
+    """
+
+    def __init__(self, dim: int | None = None):
+        if dim is None:
+            c = cfg.get_config()
+            if c.embedder.type == "bailian":
+                dim = c.embedder.bailian.dimension
+            else:
+                dim = c.embedder.local.dimension
+        self._dim = dim
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+    def embed_dense(self, text: str, mode: str = "document") -> list[float]:
+        return [0.1] * self._dim
+
+    def embed_sparse(self, text: str, mode: str = "document") -> dict[int, float]:
+        return {1: 0.5, 2: 0.3}
+
+
+def make_orm_record(doc_id: str, **overrides) -> SimpleNamespace:
+    """造一条 ApiDocumentLike duck-typed 记录。"""
+    fields = {
+        "chunk_id": doc_id,
+        "name": doc_id,
+        "namespace": "com.test.v1",
+        "language": "python",
+        "category": "function",
+        "title": f"Test {doc_id}",
+        "description": f"desc {doc_id}",
+        "params_md": "",
+        "returns": "null",
+        "examples": [],
+        "body_md": f"# {doc_id}",
+        "product_support": [{"product": "linux", "supported": True}],
+        "signature": f"{doc_id}()",
+        "deprecated": False,
+        "deprecation_note": "",
+        "ingested_at": 1720000000,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+class TestDirectorDoc:
+    """DirectorDoc dataclass 自身的行为。"""
+
+    def test_doc_id_from_record(self):
+        rec = make_orm_record("abc")
+        ddoc = DirectorDoc(record=rec, embedder=_FakeEmbedder())
+        assert ddoc.doc_id == "abc"
+
+    def test_is_frozen(self):
+        rec = make_orm_record("abc")
+        ddoc = DirectorDoc(record=rec, embedder=_FakeEmbedder())
+        # frozen=True → 不允许改属性
+        with pytest.raises((AttributeError, Exception)):
+            ddoc.record = make_orm_record("xyz")  # type: ignore[misc]
+
+    def test_to_zvec_returns_full_doc(self):
+        rec = make_orm_record("abc")
+        emb = _FakeEmbedder()
+        ddoc = DirectorDoc(record=rec, embedder=emb)
+        full = ddoc.to_zvec()
+        assert full.id == "abc"
+        # vectors 都填上了
+        from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
+        assert FIELD_DENSE_EMBEDDING in full.vectors
+        assert FIELD_SPARSE_EMBEDDING in full.vectors
+        assert len(full.vectors[FIELD_DENSE_EMBEDDING]) == emb.dim
+
+    def test_to_zvec_does_not_mutate_self(self):
+        rec = make_orm_record("abc")
+        ddoc = DirectorDoc(record=rec, embedder=_FakeEmbedder())
+        _ = ddoc.to_zvec()
+        # 多次 to_zvec() 返回不同 zvec.Doc，但 ddoc 自身不变
+        assert ddoc.doc_id == "abc"
+        assert isinstance(ddoc.embedder, _FakeEmbedder)
+
+
+class TestCollectionSession:
+    """CollectionSession context manager 的 open / 释放行为。"""
+
+    def test_enter_returns_collection(self, isolated_config, tmp_path):
+        name = "session_basic"
+        with CollectionSession(name) as coll:
+            assert coll is not None
+            assert coll.stats.doc_count == 0
+        # 退出后 coll 引用已被清掉
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_read_only_rejects_writes(self, isolated_config, tmp_path):
+        name = "session_ro"
+        # 先用 read-write 建 + 写（不放在 CollectionSession 里，避免 zvec 锁延迟释放）
+        coll = open_or_create_collection(name)
+        try:
+            coll.upsert(make_doc("a"))
+        finally:
+            del coll
+            gc.collect()
+        # 再用 read_only CollectionSession 打开 → upsert 必须被拒
+        with CollectionSession(name, read_only=True) as coll_ro, \
+                pytest.raises(Exception, match="read-only"):
+            coll_ro.upsert(make_doc("b"))
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_missing_collection_raises(self, isolated_config):
+        # read_only=True + 目录不在 → CollectionNotFoundError
+        # __enter__ 自身就抛，所以不能放 with 块里；用显式 try
+        sess = CollectionSession("nonexistent_session_xyz", read_only=True)
+        with pytest.raises(CollectionNotFoundError):
+            sess.__enter__()
+
+
+class TestCollectionNameCRUD:
+    """高层 CRUD：传 collection 名 + DirectorDoc。"""
+
+    @staticmethod
+    def _open_for_verify(name: str):
+        """开 collection 做断言验证；返回 coll，调用方负责 del + gc.collect。"""
+        return open_or_create_collection(name)
+
+    def test_insert_single(self, isolated_config, tmp_path):
+        name = "hi_insert"
+        rec = make_orm_record("a")
+        ddoc = DirectorDoc(record=rec, embedder=_FakeEmbedder())
+        insert(name, ddoc)
+        # 验证落库
+        coll = self._open_for_verify(name)
+        try:
+            assert count_docs(coll) == 1
+            d = fetch_doc(coll, "a")
+            assert d is not None
+            assert d.id == "a"
+        finally:
+            del coll
+            gc.collect()
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_insert_overwrites_existing(self, isolated_config, tmp_path):
+        name = "hi_overwrite"
+        # 先写一条
+        rec1 = make_orm_record("a", description="v1")
+        insert(name, DirectorDoc(record=rec1, embedder=_FakeEmbedder()))
+        # 再写同 id（description 改）
+        rec2 = make_orm_record("a", description="v2")
+        insert(name, DirectorDoc(record=rec2, embedder=_FakeEmbedder()))
+        # 验证 description 已被覆盖
+        coll = self._open_for_verify(name)
+        try:
+            d = fetch_doc(coll, "a")
+            assert d.fields["description"] == "v2"
+        finally:
+            del coll
+            gc.collect()
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_insert_many_stats(self, isolated_config, tmp_path):
+        name = "hi_batch"
+        recs = [make_orm_record(f"x{i}") for i in range(3)]
+        ddocs = [DirectorDoc(record=r, embedder=_FakeEmbedder()) for r in recs]
+        result = insert_many(name, ddocs)
+        assert result["ok"] == 3
+        assert result["fail"] == 0
+        assert result["errors"] == []
+        coll = self._open_for_verify(name)
+        try:
+            assert count_docs(coll) == 3
+        finally:
+            del coll
+            gc.collect()
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_insert_many_empty(self, isolated_config, tmp_path):
+        name = "hi_empty"
+        result = insert_many(name, [])
+        assert result == {"ok": 0, "fail": 0, "errors": []}
+
+    def test_delete(self, isolated_config, tmp_path):
+        name = "hi_delete"
+        rec = make_orm_record("a")
+        insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        delete(name, "a")
+        coll = self._open_for_verify(name)
+        try:
+            assert count_docs(coll) == 0
+            assert fetch_doc(coll, "a") is None
+        finally:
+            del coll
+            gc.collect()
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_delete_many(self, isolated_config, tmp_path):
+        name = "hi_delete_many"
+        for i in range(3):
+            rec = make_orm_record(f"x{i}")
+            insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        result = delete_many(name, ["x0", "x1", "missing"])
+        assert result["ok"] == 3  # zvec 静默成功
+        assert result["fail"] == 0
+        coll = self._open_for_verify(name)
+        try:
+            assert count_docs(coll) == 1  # 只剩 x2
+        finally:
+            del coll
+            gc.collect()
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_count(self, isolated_config, tmp_path):
+        name = "hi_count"
+        for i in range(5):
+            rec = make_orm_record(f"x{i}")
+            insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        assert count(name) == 5
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_fetch_returns_director_doc(self, isolated_config, tmp_path):
+        name = "hi_fetch"
+        rec = make_orm_record("a", description="hello")
+        insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        ddoc = fetch(name, "a")
+        assert ddoc is not None
+        assert ddoc.doc_id == "a"
+        # 验证 record 字段被反推
+        assert ddoc.record.description == "hello"
+        # embedder 是 None（fetch 不带 embedder）
+        assert ddoc.embedder is None
+
+    def test_fetch_missing_returns_none(self, isolated_config, tmp_path):
+        name = "hi_fetch_missing"
+        rec = make_orm_record("a")
+        insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        assert fetch(name, "ghost") is None
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_update_replaces_fields(self, isolated_config, tmp_path):
+        name = "hi_update"
+        rec = make_orm_record("a", description="v1")
+        insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        # update 用新 record
+        rec2 = make_orm_record("a", description="v2")
+        update(name, DirectorDoc(record=rec2, embedder=_FakeEmbedder()))
+        ddoc = fetch(name, "a")
+        assert ddoc.record.description == "v2"
+        shutil.rmtree(collection_path(name), ignore_errors=True)
+
+    def test_update_many(self, isolated_config, tmp_path):
+        name = "hi_update_many"
+        for i in range(2):
+            rec = make_orm_record(f"x{i}", description=f"old_{i}")
+            insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
+        recs = [make_orm_record(f"x{i}", description=f"new_{i}") for i in range(2)]
+        ddocs = [DirectorDoc(record=r, embedder=_FakeEmbedder()) for r in recs]
+        update_many(name, ddocs)
+        for i in range(2):
+            ddoc = fetch(name, f"x{i}")
+            assert ddoc.record.description == f"new_{i}"
+        shutil.rmtree(collection_path(name), ignore_errors=True)

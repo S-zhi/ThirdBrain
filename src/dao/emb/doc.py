@@ -33,7 +33,6 @@ from src.dao.emb.schema import (
     FIELD_VERSION_SUPPORT,
 )
 
-
 # ---------------------------------------------------------------------------
 # 鸭子类型：ORM 文档的最小契约
 # ---------------------------------------------------------------------------
@@ -80,7 +79,10 @@ class ApiDocumentLike(Protocol):
 #: 这是"硬编码"规则：依赖 ingest 输出的固定章节结构。如果将来 ingest 改了
 #: 章节写法（比如换 ``###`` 或换英文 "Function Signature"），这里会失效 —
 #: 需要同步更新。
-_SIG_RE = re.compile(r"####\s*函数原型\s*\n(.*?)(?=\n####|\Z)", re.DOTALL)
+_SIG_RE = re.compile(
+    r"####[^\S\r\n]*函数原型[^\S\r\n]*\r?\n(.*?)(?=\r?\n####|\Z)",
+    re.DOTALL,
+)
 
 
 def extract_api_name(record: ApiDocumentLike) -> str:

@@ -61,6 +61,10 @@ class MongoSettings(BaseSettings):
         default="lig_text_states",
         description="文本状态集合名。",
     )
+    query_record_collection: str = Field(
+        default="agent_query_records",
+        description="Agent 查询记录与结果快照集合名。",
+    )
 
     # ---- 客户端参数 ----
     app_name: str = Field(

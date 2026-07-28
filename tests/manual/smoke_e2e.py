@@ -21,7 +21,7 @@ from src.dao.emb import (  # noqa: E402
     build_embedder,
     from_orm,
     open_or_create_collection,
-    upsert_batch,
+    insert_batch,
     search,
     search_by_name,
     wait_for_index_ready,
@@ -103,7 +103,7 @@ def load_yaml_as_orm(path: Path) -> YamlDoc:
 
 def main():
     # 1. 加载 2 份真实 YAML
-    yaml_dir = ROOT / "ingest" / "output" / "yaml" / "AI_CPU_API"
+    yaml_dir = ROOT / "yaml" / "AI_CPU_API"
     yaml_files = [
         yaml_dir / "DataStoreBarrier.yaml",
         yaml_dir / "assert.yaml",
@@ -138,7 +138,7 @@ def main():
     # 5. Upsert batch
     print("\n[5/6] Upsert batch (2 docs, embed + write)...")
     t0 = time.time()
-    result = upsert_batch(coll, zvec_docs, embedder)
+    result = insert_batch(coll, zvec_docs, embedder)
     print(f"      - result: {result}, took {time.time()-t0:.1f}s")
     print(f"      - stats: {coll.stats}")
 

@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 # config.ConfigError 是全局唯一的（避免重复定义导致 except 抓不到跨模块异常）
-from config import ConfigError  # type: ignore[unused-ignore]  # noqa: F401  重新导出，方便调用方统一 import
+from config import (
+    ConfigError,  # type: ignore[unused-ignore]  # noqa: F401  重新导出，方便调用方统一 import
+)
 
 
 class EmbError(Exception):
@@ -67,11 +69,11 @@ class SearchError(EmbError):
 
     触发场景：
     - :func:`src.dao.emb.searcher.search` 时 embed 调用失败。
-    - :func:`src.dao.emb.indexer.upsert_doc` / :func:`src.dao.emb.indexer.update_doc`
+    - :func:`src.dao.emb.indexer.insert_doc` / :func:`src.dao.emb.indexer.update_doc`
       时 zvec 写失败。
     - 其他 Zvec IO / 序列化错误。
 
-    命名"Search"是历史原因（最初只有 search 会抛）；现在 upsert / update 也用它。
+    命名"Search"是历史原因（最初只有 search 会抛）；现在 insert / update 也用它。
     """
 
 

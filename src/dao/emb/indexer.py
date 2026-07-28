@@ -1,4 +1,4 @@
-"""Zvec 写入层：upsert / delete / collection 开关。
+"""Zvec 写入层：insert / delete / collection 开关。
 
 职责：
 - 把 doc.py 生成的 ``zvec.Doc`` 调 embedder 生成向量，合并成完整 doc，写入 Zvec。
@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Any
+from typing import Any
 
 import zvec
 
@@ -165,7 +166,7 @@ def _migrate_schema_if_needed(
         if name not in desired_fields_by_name:
             logger.warning(
                 "zvec.schema.orphan_field collection=%s field=%s 磁盘上有但 C 端"
-                f" schema 期望中没有; 保留不删 (如需删除请人工调 drop_column)",
+                " schema 期望中没有; 保留不删 (如需删除请人工调 drop_column)",
                 cur.name,
                 name,
             )
@@ -173,8 +174,8 @@ def _migrate_schema_if_needed(
         if name not in desired_vectors_by_name:
             logger.warning(
                 "zvec.schema.orphan_vector collection=%s vector=%s 磁盘上有但 C"
-                f" 端 schema 期望中没有; 保留不删 (删除 vector 字段会丢全部数据, "
-                f"请人工评估)",
+                " 端 schema 期望中没有; 保留不删 (删除 vector 字段会丢全部数据, "
+                "请人工评估)",
                 cur.name,
                 name,
             )
@@ -386,24 +387,31 @@ def _attach_vectors(
 
 
 # ---------------------------------------------------------------------------
-# 写入操作
+# 写入操作（低层 API — 直接传 open collection 句柄）
+#
+# 调用方需要自己管 collection 的 open/close；如要"传 collection 名 + DirectorDoc
+# 自动 open"的便利入口，看 :mod:`src.dao.emb.director` 里的高层 CRUD。
 # ---------------------------------------------------------------------------
 
-def upsert_doc(
+def insert_doc(
     coll: zvec.Collection,
     doc: zvec.Doc,
     embedder: Embedder,
 ) -> None:
-    """单条 embed + upsert。同 id 已存在则覆盖（Zvec upsert 语义）。
+    """单条 embed + 写入。同 id 已存在则覆盖（Zvec upsert 语义）。
+
+    注意：函数名 ``insert`` 是友好叫法，**不**是严格 SQL ``INSERT``。
+    zvec 的写操作只有一种（``coll.upsert``），等价于"存在就覆盖、不存在就新增"。
+    如果你需要严格 insert 语义（id 存在报错），调用方在调用前自己检查。
 
     流程：:func:`_attach_vectors` → ``coll.upsert(full_doc)``。
     zvec 内部行为：先到 flat buffer（**不**立刻建 HNSW 索引），后台会
-    把 buffer flush 到 HNSW。如果需要"写完立刻能搜"，调用方在批 upsert
+    把 buffer flush 到 HNSW。如果需要"写完立刻能搜"，调用方在批 insert
     后等 :func:`src.dao.emb.wait_for_index_ready`。
 
     Raises:
         EmbedderError: embed 阶段失败。
-        SearchError: zvec upsert 阶段失败（IO / 序列化等）。包装原始异常，
+        SearchError: zvec 写阶段失败（IO / 序列化等）。包装原始异常，
             不让 zvec 的内部错误类型泄漏到上层。
     """
     full_doc = _attach_vectors(doc, embedder)
@@ -412,18 +420,18 @@ def upsert_doc(
     except EmbedderError:
         raise
     except Exception as e:
-        raise SearchError(f"zvec upsert failed for {doc.id}: {e}") from e
+        raise SearchError(f"zvec insert failed for {doc.id}: {e}") from e
 
 
-def upsert_batch(
+def insert_batch(
     coll: zvec.Collection,
     docs: Iterable[zvec.Doc],
     embedder: Embedder,
 ) -> dict:
-    """批量 embed + upsert。
+    """批量 embed + 写入。
 
     行为：
-    - **串行** embed → 串行 upsert（Zvec 写是单进程独占，串行更安全）。
+    - **串行** embed → 串行 insert（Zvec 写是单进程独占，串行更安全）。
       如果将来 dense embedder 支持 batch 调用，可以改成真 batch 加速。
     - 单条失败不影响其他 doc；embed 失败和 zvec 失败都被捕获。
     - 真·未知异常（既不是 :class:`EmbedderError` 也不是 :class:`SearchError`）
@@ -443,7 +451,7 @@ def upsert_batch(
     ok, fail, errors = 0, 0, []
     docs_list = list(docs)  # 一次性 materialize，避免迭代两次
 
-    # 串行 embed → 串行 upsert（Zvec 写是单进程独占，串行更安全）
+    # 串行 embed → 串行 insert（Zvec 写是单进程独占，串行更安全）
     # （如果以后 dense embedder 支持 batch，可以在这里改成 batch 调用）
     for doc in docs_list:
         try:
@@ -466,7 +474,7 @@ def delete_doc(coll: zvec.Collection, doc_id: str) -> None:
 
     ⚠️ zvec 的 delete 是**物理**删除，没有 archived / soft-delete 概念。
     如果你需要"软删"（保留数据可恢复），在 ORM 层做（设置 ``archived_at``），
-    然后**不要**调本函数；调 :func:`upsert_doc` 把 doc 改成"废弃"状态。
+    然后**不要**调本函数；调 :func:`insert_doc` 把 doc 改成"废弃"状态。
     """
     coll.delete(ids=doc_id)
 
@@ -560,8 +568,8 @@ def list_ids(coll: zvec.Collection) -> list[str]:
 def update_doc(coll: zvec.Collection, doc: zvec.Doc) -> None:
     """部分更新：只改 ``doc`` 里显式给出的字段，其他保持不变。
 
-    跟 :func:`upsert_doc` 的关键区别：
-    - ``upsert_doc``: 完整替换 doc 全部 fields + vectors。
+    跟 :func:`insert_doc` 的关键区别：
+    - ``insert_doc``: 完整替换 doc 全部 fields + vectors。
     - ``update_doc``: 只改 doc 里出现的 fields，其他原值保留。
 
     .. warning::

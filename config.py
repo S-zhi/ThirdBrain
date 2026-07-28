@@ -36,8 +36,7 @@ class BailianConfig:
     字段含义：
     - ``model``: DashScope 上的 embedding 模型名（默认 qwen3.7-text-embedding）。
     - ``dimension``: 期望的向量维度。DashScope v3/v4 合法值为
-      ``[2048, 1536, 1024, 768, 512, 256, 128, 64]``；本项目目前固定 2560，
-      跑不起来就是模型/维度不匹配。
+      ``[2048, 1536, 1024, 768, 512, 256, 128, 64]``；本项目使用 2048 维。
     - ``max_retries``: 5xx / 网络失败时的最大重试次数。
     - ``timeout``: 单次 HTTP 请求的超时秒数。
 
@@ -189,7 +188,7 @@ def load_config(config_path: str | Path = "config.yaml") -> Config:
 
     bailian_cfg = BailianConfig(
         model=bailian_raw.get("model", "qwen3.7-text-embedding"),
-        dimension=int(bailian_raw.get("dimension", 2560)),
+        dimension=int(bailian_raw.get("dimension", 2048)),
         max_retries=int(bailian_raw.get("max_retries", 3)),
         timeout=int(bailian_raw.get("timeout", 30)),
     )

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from src.dao.mongo.bootstrap import (
+    QUERY_RECORD_INDEXES,
     RECORD_INDEXES,
     STATE_INDEXES,
     MongoBootstrap,
@@ -47,13 +48,30 @@ from src.dao.mongo.models import (
     LIGUpdateRecord,
     LIGUpdateRecordPatch,
 )
+from src.dao.mongo.query_record_dao import (
+    QueryDocumentSnapshot,
+    QueryExecutionStatus,
+    QueryRecord,
+    QueryRecordDAO,
+    QueryRecordError,
+    QueryRecordFilters,
+    QueryStrategy,
+)
 from src.dao.mongo.settings import (
     MongoSettings,
     get_mongo_settings,
     reset_mongo_settings,
 )
+from src.dao.mongo.yaml_document_dao import (
+    COLLECTION_NAME_PATTERN,
+    YamlDocumentDAO,
+    YamlDocumentInsertResult,
+    validate_collection_name,
+)
 
 __all__ = [
+    "COLLECTION_NAME_PATTERN",
+    "QUERY_RECORD_INDEXES",
     "RECORD_INDEXES",
     "STATE_INDEXES",
     "CursorPage",
@@ -81,6 +99,13 @@ __all__ = [
     "MongoDatabase",
     # settings
     "MongoSettings",
+    "QueryDocumentSnapshot",
+    "QueryExecutionStatus",
+    "QueryRecord",
+    "QueryRecordDAO",
+    "QueryRecordError",
+    "QueryRecordFilters",
+    "QueryStrategy",
     "TriggerType",
     "UpdateMode",
     # enums
@@ -88,6 +113,9 @@ __all__ = [
     "UpdateStage",
     "UpdateState",
     "UpdateStatus",
+    "YamlDocumentDAO",
+    "YamlDocumentInsertResult",
     "get_mongo_settings",
     "reset_mongo_settings",
+    "validate_collection_name",
 ]

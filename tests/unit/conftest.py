@@ -27,7 +27,7 @@ embedder:
   type: local
   bailian:
     model: qwen3.7-text-embedding
-    dimension: 2560
+    dimension: 2048
     max_retries: 3
     timeout: 30
   local:

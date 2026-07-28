@@ -3,7 +3,7 @@
 覆盖：
 - collection_path 路径拼接
 - _attach_vectors：默认文本拼接 / 显式文本 / 空文本报错 / embedder 异常包成 EmbedderError
-- upsert_batch / delete_batch 错误统计
+- insert_batch / delete_batch 错误统计
 - open_collection 不存在时抛 CollectionNotFoundError
 """
 
@@ -26,8 +26,8 @@ from src.dao.emb.indexer import (
     delete_doc,
     open_collection,
     open_or_create_collection,
-    upsert_batch,
-    upsert_doc,
+    insert_batch,
+    insert_doc,
 )
 from src.dao.emb.schema import (
     FIELD_DENSE_EMBEDDING,
@@ -175,7 +175,7 @@ class TestAttachVectors:
 
 
 # ---------------------------------------------------------------------------
-# upsert_doc / upsert_batch
+# insert_doc / insert_batch
 # ---------------------------------------------------------------------------
 
 class FakeCollection:
@@ -200,12 +200,12 @@ class FakeCollection:
             self.deleted.append(i)
 
 
-class TestUpsertDoc:
+class TestInsertDoc:
     def test_success(self, make_zvec_doc):
         coll = FakeCollection()
         emb = FakeEmbedder()
         doc = make_zvec_doc(doc_id="ns.op.1")
-        upsert_doc(coll, doc, emb)
+        insert_doc(coll, doc, emb)
         assert len(coll.upserted) == 1
         assert coll.upserted[0].id == "ns.op.1"
         assert FIELD_DENSE_EMBEDDING in coll.upserted[0].vectors
@@ -215,16 +215,16 @@ class TestUpsertDoc:
         emb = FakeEmbedder(dense_exc=EmbedderError("boom"))
         doc = make_zvec_doc()
         with pytest.raises(EmbedderError):
-            upsert_doc(coll, doc, emb)
+            insert_doc(coll, doc, emb)
         assert coll.upserted == []
 
 
-class TestUpsertBatch:
+class TestInsertBatch:
     def test_all_success(self, make_zvec_doc):
         coll = FakeCollection()
         emb = FakeEmbedder()
         docs = [make_zvec_doc(doc_id=f"ns.op.{i}") for i in range(3)]
-        result = upsert_batch(coll, docs, emb)
+        result = insert_batch(coll, docs, emb)
         assert result == {"ok": 3, "fail": 0, "errors": []}
         assert len(coll.upserted) == 3
 
@@ -243,7 +243,7 @@ class TestUpsertBatch:
         emb.embed_dense = flaky_embed
         coll = FakeCollection()
         docs = [make_zvec_doc(doc_id=f"ns.op.{i}") for i in range(3)]
-        result = upsert_batch(coll, docs, emb)
+        result = insert_batch(coll, docs, emb)
         assert result["ok"] == 2
         assert result["fail"] == 1
         assert len(result["errors"]) == 1
@@ -258,14 +258,14 @@ class TestUpsertBatch:
         coll = FakeCollection()
         emb = FakeEmbedder()
         docs = (make_zvec_doc(doc_id=f"ns.op.{i}") for i in range(2))
-        result = upsert_batch(coll, docs, emb)
+        result = insert_batch(coll, docs, emb)
         assert result["ok"] == 2
 
-    def test_upsert_runtime_error_counted(self, make_zvec_doc):
+    def test_insert_runtime_error_counted(self, make_zvec_doc):
         coll = FakeCollection(fail_ids={"ns.op.1"})
         emb = FakeEmbedder()
         docs = [make_zvec_doc(doc_id=f"ns.op.{i}") for i in range(3)]
-        result = upsert_batch(coll, docs, emb)
+        result = insert_batch(coll, docs, emb)
         assert result["ok"] == 2
         assert result["fail"] == 1
         assert result["errors"][0][0] == "ns.op.1"

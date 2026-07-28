@@ -41,7 +41,7 @@
 ```
 .
 ├── core/            # 领域类型：API Document / Version / Namespace / Contract
-├── ingest/          # 文档解析、结构化、版本对齐、增量同步、弃用状态
+├── ingest/          # 【独立 scripts，不属于运行时库】文档解析、结构化、版本对齐、增量同步、弃用状态
 ├── retrieve/        # 意图识别 → 查询构造 → 粗排 → 精排 → 重排
 ├── context/         # 上下文包构造：候选对比卡、参数契约、反例
 ├── trace/           # 5 阶段 Trace 数据模型、采集、查询接口
@@ -62,7 +62,7 @@
 - **代码风格**：
   - Python: `ruff format` + `ruff check`，`line-length = 100`
   - 公共 API 强制 `mypy --strict`
-  - 命名空间/版本字符串一律**全小写 + 点分隔**（`com.example.product.api.v2`）
+  - 命名空间/版本字符串使用点分隔并保留官方大小写（如 `AscendC.910beta3`），禁止自行改写
   - 标识符英文；注释与文档中文
 - **测试**：
   - 任何新行为必须有单测；新检索策略必须有 Benchmark case
@@ -87,7 +87,7 @@
 
 - [x] **向量后端：Zvec** ✅（2026-07-27 选定；阿里开源 in-process 向量库，详见 `src/dao/emb/`）
 - [ ] LLM 提供方：OpenAI / Anthropic / 本地 vLLM（建议先 OpenAI 跑通，再做抽象）
-- [x] Embedding 提供方：**Bailian 千问 qwen3.7-text-embedding**（2560 维，主路径）；本地 sentence-transformers MiniLM（CI/离线 fallback）。`src/dao/emb/embedder.py`
+- [x] Embedding 提供方：**Bailian 千问 qwen3.7-text-embedding**（2048 维，主路径）；本地 sentence-transformers MiniLM（CI/离线 fallback）。`src/dao/emb/embedder.py`
 - [ ] PRD 中"只查一次"策略的真实范围（PRD 标注待定）
 - [ ] 文档结构 schema：pydantic 导出 JSON Schema / Protobuf
 - [ ] Trace 落库：Postgres（同库）/ ClickHouse（独立 OLAP）

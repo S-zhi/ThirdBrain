@@ -6,7 +6,8 @@
 - ``schema``      — Zvec CollectionSchema 定义
 - ``doc``         — ORM → zvec.Doc 转换
 - ``embedder``    — Embedder ABC + Bailian + Local
-- ``indexer``     — 写入层（upsert / delete）
+- ``indexer``     — 写入层（低层 insert / delete / fetch / count）
+- ``director``    — 高层 CRUD：DirectorDoc + CollectionSession + 传 collection 名的入口
 - ``searcher``    — 检索层（search / search_by_name / RRF）
 """
 
@@ -16,6 +17,18 @@ import time
 
 import zvec
 
+from src.dao.emb.director import (
+    CollectionSession,
+    DirectorDoc,
+    count,
+    delete,
+    delete_many,
+    fetch,
+    insert,
+    insert_many,
+    update,
+    update_many,
+)
 from src.dao.emb.doc import (
     ApiDocumentLike,
     extract_api_name,
@@ -48,13 +61,13 @@ from src.dao.emb.indexer import (
     delete_doc,
     fetch_batch,
     fetch_doc,
+    insert_batch,
+    insert_doc,
     list_ids,
     open_collection,
     open_or_create_collection,
     update_batch,
     update_doc,
-    upsert_batch,
-    upsert_doc,
 )
 from src.dao.emb.schema import (
     FIELD_API_ID,
@@ -84,35 +97,80 @@ from src.dao.emb.searcher import (
     rrf,
     search,
     search_by_name,
+    search_dense,
+    search_exact_name,
 )
 
-
 __all__ = [
-    # exceptions
-    "EmbError", "ConfigError", "EmbedderError", "SchemaMismatchError",
-    "CollectionNotFoundError", "DocBuildError", "SearchError", "NotSupportedError",
-    # schema
-    "get_collection_schema",
-    "FIELD_NAMESPACE", "FIELD_API_ID", "FIELD_NAME", "FIELD_API_NAME",
-    "FIELD_VERSION", "FIELD_KIND", "FIELD_LANGUAGE", "FIELD_VERSION_SUPPORT",
-    "FIELD_DEPRECATED", "FIELD_INGESTED_AT", "FIELD_DESCRIPTION",
-    "FIELD_SIGNATURE", "FIELD_PARAMETERS_MD", "FIELD_RETURNS_JSON",
-    "FIELD_EXAMPLES", "FIELD_SOURCE_MARKDOWN", "FIELD_DEPRECATION_NOTE",
-    "FIELD_DENSE_EMBEDDING", "FIELD_SPARSE_EMBEDDING",
-    # doc
-    "ApiDocumentLike", "from_orm",
-    "extract_api_name", "extract_signature",
-    "extract_version_from_namespace", "extract_version_support",
-    # embedder
-    "Embedder", "BailianEmbedder", "LocalEmbedder", "TFIDFSparseEncoder",
+    "FIELD_API_ID",
+    "FIELD_API_NAME",
+    "FIELD_DENSE_EMBEDDING",
+    "FIELD_DEPRECATED",
+    "FIELD_DEPRECATION_NOTE",
+    "FIELD_DESCRIPTION",
+    "FIELD_EXAMPLES",
+    "FIELD_INGESTED_AT",
+    "FIELD_KIND",
+    "FIELD_LANGUAGE",
+    "FIELD_NAME",
+    "FIELD_NAMESPACE",
+    "FIELD_PARAMETERS_MD",
+    "FIELD_RETURNS_JSON",
+    "FIELD_SIGNATURE",
+    "FIELD_SOURCE_MARKDOWN",
+    "FIELD_SPARSE_EMBEDDING",
+    "FIELD_VERSION",
+    "FIELD_VERSION_SUPPORT",
+    "ApiDocumentLike",
+    "BailianEmbedder",
+    "CollectionNotFoundError",
+    "CollectionSession",
+    "ConfigError",
+    "DirectorDoc",
+    "DocBuildError",
+    "EmbError",
+    "Embedder",
+    "EmbedderError",
+    "LocalEmbedder",
+    "NotSupportedError",
+    "SchemaMismatchError",
+    "SearchError",
+    "SearchQuery",
+    "SearchResult",
+    "TFIDFSparseEncoder",
     "build_embedder",
-    # indexer
-    "open_or_create_collection", "open_collection", "collection_path",
-    "upsert_doc", "upsert_batch", "delete_doc", "delete_batch",
-    "fetch_doc", "fetch_batch", "count_docs", "list_ids",
-    "update_doc", "update_batch",
-    # searcher
-    "SearchQuery", "SearchResult", "search", "search_by_name", "rrf",
+    "collection_path",
+    "count",
+    "count_docs",
+    "delete",
+    "delete_batch",
+    "delete_doc",
+    "delete_many",
+    "extract_api_name",
+    "extract_signature",
+    "extract_version_from_namespace",
+    "extract_version_support",
+    "fetch",
+    "fetch_batch",
+    "fetch_doc",
+    "from_orm",
+    "get_collection_schema",
+    "insert",
+    "insert_batch",
+    "insert_doc",
+    "insert_many",
+    "list_ids",
+    "open_collection",
+    "open_or_create_collection",
+    "rrf",
+    "search",
+    "search_by_name",
+    "search_dense",
+    "search_exact_name",
+    "update",
+    "update_batch",
+    "update_doc",
+    "update_many",
 ]
 
 
