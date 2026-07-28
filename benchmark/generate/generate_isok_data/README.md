@@ -1,0 +1,126 @@
+# Benchmark 评测数据生成工具
+
+从 API 文档自动生成评测问题、标准答案和评判规则，用于评估 RAG 对 LLM 代码生成能力的帮助程度。
+
+## 工作流程
+
+```
+批量文档 → 全局扫描 → API选取 → 问题生成 → 标准答案生成 → JSONL输出
+```
+
+1. **全局扫描**（节点2）：浅扫所有文档，提取 API 列表、摘要、模块，识别相似 API 组
+2. **API 选取**（节点3）：按概率策略选取文档（90% 随机 / 10% 对比）
+3. **问题生成**（节点4）：基于选中 API 文档批量生成问题，自动分配标签
+4. **答案生成**（节点5）：为标准答案 + 评估说明
+5. **输出**（节点6）：JSONL 格式，每行一条评测数据
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+pip install openai
+```
+
+### 2. 配置 LLM API
+
+通过环境变量或直接修改 `config.py`：
+
+```bash
+export LLM_BASE_URL="https://api.openai.com/v1"
+export LLM_API_KEY="sk-your-api-key"
+export LLM_MODEL_NAME="gpt-4o-mini"
+```
+
+### 3. 运行
+
+```bash
+# 使用示例文档，生成 3 条评测数据
+python run.py --docs_dir ./examples --count 3 --output output.jsonl
+
+# Mock 模式（跳过 LLM，测试流程）
+python run.py --docs_dir ./examples --count 2 --mock
+
+# 覆盖输出文件
+python run.py --docs_dir ./my_docs --count 10 --output benchmark.jsonl --clear
+```
+
+### CLI 参数
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--docs_dir` | API 文档目录路径 | `./examples` |
+| `--count` | 每轮生成的问题数量 | `1` |
+| `--output` | 输出 JSONL 文件路径 | `output.jsonl` |
+| `--mock` | Mock 模式（跳过 LLM） | `false` |
+| `--clear` | 覆盖输出文件而非追加 | `false` |
+
+## 输出格式
+
+每行一条 JSON 记录：
+
+```json
+{
+  "question": "如何使用 pandas.DataFrame.sort_values 按多列排序？",
+  "tag": "简单用法",
+  "answer": "```python\nimport pandas as pd\ndf = pd.DataFrame(...)\nresult = df.sort_values(by=['col1', 'col2'], ascending=[True, False])\n```\n\n说明：...",
+  "evaluation_note": "关键判定点：必须使用 sort_values 函数。常见错误：ascending 参数与 by 长度不匹配。宽容点：变量命名不影响评分。",
+  "source_docs": ["sample_api.md"],
+  "selection_mode": "单API"
+}
+```
+
+### 字段说明
+
+| 字段 | 说明 |
+|------|------|
+| `question` | 评测问题文本 |
+| `tag` | 标签：`简单用法` / `编写代码` / `平台适配` / `其他` |
+| `answer` | 标准答案（代码 + 说明） |
+| `evaluation_note` | 评估说明（≤ 200 字） |
+| `source_docs` | 来源文档文件名列表 |
+| `selection_mode` | 选取模式：`单API` / `多API对比` / `混合` |
+
+## 项目结构
+
+```
+benchmark_workflow/
+├── config.py          # 配置（LLM API、路径、策略参数）
+├── scanner.py         # 节点2：全局浅扫
+├── selector.py        # 节点3：API 选取（含概率策略）
+├── question_gen.py    # 节点4：问题生成（含标签分配）
+├── answer_gen.py      # 节点5：标准答案生成
+├── pipeline.py        # 主流程串联
+├── prompts/           # LLM 提示词模板
+│   ├── scan.md        # 扫描提示词
+│   ├── similarity.md  # 相似性检测提示词
+│   ├── question.md    # 问题生成提示词
+│   └── answer.md      # 答案生成提示词
+├── run.py             # CLI 入口
+├── README.md          # 本文件
+└── examples/          # 示例文档
+    ├── sample_api.md  # pandas.sort_values
+    ├── sample_api2.md # pandas.sort_index
+    └── sample_api3.md # pandas.groupby
+```
+
+## 选取策略详解
+
+### 随机模式（90% 概率）
+- 从文档池中随机选取 1 个文档
+- 有 10% 概率扩展为多选（追加 1-2 个相关文档）
+- 扩展依据：相似组 > 同模块 > 随机补充
+
+### 对比模式（10% 概率）
+- 从相似 API 组中选取 2-3 个文档
+- 生成对比性问题（"A 和 B 有什么区别？"）
+- 若相似组源文件不足 2 个，退回随机模式
+
+## 标签体系
+
+| 标签 | 适用场景 |
+|------|---------|
+| 简单用法 | 单个 API 的基础调用，参数用法，返回值结构 |
+| 编写代码 | 需要完整代码块，多 API 组合，完整功能实现 |
+| 平台适配 | 特定 OS/框架/硬件的差异处理 |
+| 其他 | API 对比、性能、错误处理、最佳实践 |
