@@ -3,6 +3,8 @@
 为代码 Agent 提供版本化 API 文档检索与可信上下文服务。当前向量存储使用
 Zvec，生产集合为 `ascendc_api`。
 
+第一次使用项目请先阅读 [快速开始](docs/quick-start.md)。
+
 ## 启动 Zvec Studio
 
 在项目根目录执行：
