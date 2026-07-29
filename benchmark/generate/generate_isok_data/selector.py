@@ -1,80 +1,116 @@
 """
 节点3：API 选取
+- 均匀轮转：优先选近期没被选过的文档，确保所有 API 被均匀覆盖
 - 90% 概率随机模式：选1个API文档，有10%概率扩展为多选
 - 10% 概率对比模式：从similar_groups中选2-3个API，100%多选
+- 支持并行模式下的预分配（doc_override）
 """
 
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
 
-from config import COMPARISON_MODE_PROB, RANDOM_EXPAND_PROB, MAX_EXTRA_DOCS
-from scanner import ScanResult, DocSummary, SimilarGroup
+from scanner import DocSummary, ScanResult, SimilarGroup
+
+from config import COMPARISON_MODE_PROB, MAX_EXTRA_DOCS, RANDOM_EXPAND_PROB
 
 
 @dataclass
 class SelectionResult:
     """API 选取结果。"""
-    selected_docs: List[str] = field(default_factory=list)  # 文件名列表
-    selection_mode: str = "单API"  # 单API | 多API对比 | 混合
-    primary_doc: str = ""  # 主文档（单API/混合模式时有意义）
+
+    selected_docs: list[str] = field(default_factory=list)
+    selection_mode: str = "单API"
+    primary_doc: str = ""
 
 
-def select_apis(scan_result: ScanResult, docs_dir: Path) -> SelectionResult:
+def select_apis(
+    scan_result: ScanResult,
+    docs_dir: Path,
+    recently_used: set[str] | None = None,
+    doc_override: list[str] | None = None,
+) -> SelectionResult:
     """
     根据扫描结果和概率策略，选取 API 文档。
-    
-    策略：
-    - 以 COMPARISON_MODE_PROB (10%) 概率进入对比模式
-    - 否则进入随机模式：
-      - 选 1 个随机文档
-      - 以 RANDOM_EXPAND_PROB (10%) 概率扩展为多选
+
+    Args:
+        scan_result: 扫描结果
+        docs_dir: 文档目录
+        recently_used: 近期已选过的文档文件名集合（串行模式去重用）
+        doc_override: 预分配的文档列表（并行模式用，跳过随机选取）
     """
     all_docs = scan_result.doc_summaries
     similar_groups = scan_result.similar_groups
+    recently_used = recently_used or set()
 
     if not all_docs:
         raise ValueError("没有可用的文档，无法选取")
 
-    # 判断是否进入对比模式
-    use_comparison = (
-        random.random() < COMPARISON_MODE_PROB
-        and len(similar_groups) > 0
-    )
+    # 并行模式：固定主文档保证均匀覆盖，但仍保留对比/混合策略。
+    if doc_override is not None:
+        known_names = {doc.filename for doc in all_docs}
+        override_docs = [name for name in doc_override if name in known_names]
+        if not override_docs:
+            raise ValueError("预分配的文档不在扫描结果中")
+        if len(override_docs) > 1:
+            return SelectionResult(
+                selected_docs=override_docs,
+                selection_mode="混合",
+                primary_doc=override_docs[0],
+            )
+
+        primary = next(doc for doc in all_docs if doc.filename == override_docs[0])
+        comparable_groups = [
+            group
+            for group in similar_groups
+            if primary.filename in group.source_files
+            and len(set(group.source_files) & known_names) >= 2
+        ]
+        if comparable_groups and random.random() < COMPARISON_MODE_PROB:
+            return _comparison_mode_for_primary(primary, all_docs, comparable_groups)
+        remaining = [doc for doc in all_docs if doc.filename != primary.filename]
+        return _random_mode([primary], remaining, scan_result)
+
+    # 串行模式：未用过的优先
+    unused = [d for d in all_docs if d.filename not in recently_used]
+    used = [d for d in all_docs if d.filename in recently_used]
+
+    if not unused:
+        unused = all_docs[:]
+        used = []
+        random.shuffle(unused)
+
+    use_comparison = random.random() < COMPARISON_MODE_PROB and len(similar_groups) > 0
 
     if use_comparison:
-        return _comparison_mode(all_docs, similar_groups)
+        return _comparison_mode(all_docs, similar_groups, unused)
     else:
-        return _random_mode(all_docs, scan_result)
+        return _random_mode(unused, used, scan_result)
 
 
 def _random_mode(
-    all_docs: List[DocSummary],
-    scan_result: ScanResult
+    unused: list[DocSummary],
+    used: list[DocSummary],
+    scan_result: ScanResult,
 ) -> SelectionResult:
-    """
-    随机模式：选1个文档，有概率扩展为多选。
-    """
-    # 随机选 1 个主文档
-    primary = random.choice(all_docs)
+    """以未使用文档为主池执行单 API 或混合模式选取。"""
+    pool = unused if unused else used
+    primary = random.choice(pool)
     selected = [primary.filename]
 
     print(f"[选取] 随机模式 - 主文档: {primary.filename}")
 
-    # 以 RANDOM_EXPAND_PROB 概率扩展
     if random.random() < RANDOM_EXPAND_PROB:
-        # 尝试找到包含相似 API 的其他文档
-        extra_docs = _find_related_docs(primary, scan_result, exclude=[primary.filename])
+        extra_docs = _find_related_docs(
+            primary, scan_result, exclude=[primary.filename]
+        )
         extra_docs = extra_docs[:MAX_EXTRA_DOCS]
-
         if extra_docs:
             selected.extend(extra_docs)
             mode = "混合"
-            print(f"[选取] 扩展为多选模式: {selected}")
+            print(f"[选取] 扩展为多选: {selected}")
         else:
             mode = "单API"
-            print("[选取] 无可扩展的相关文档，保持单选")
     else:
         mode = "单API"
 
@@ -86,29 +122,37 @@ def _random_mode(
 
 
 def _comparison_mode(
-    all_docs: List[DocSummary],
-    similar_groups: List[SimilarGroup]
+    all_docs: list[DocSummary],
+    similar_groups: list[SimilarGroup],
+    unused: list[DocSummary],
 ) -> SelectionResult:
-    """
-    对比模式：从相似组中选 2-3 个文档，生成对比性问题。
-    """
-    # 随机选一个相似组
-    group = random.choice(similar_groups)
+    """优先从覆盖未使用文档最多的相似组中执行对比选取。"""
+    unused_names = {d.filename for d in unused}
 
-    # 从该组的源文件中选取 2-3 个
-    candidate_files = [f for f in group.source_files if f in [d.filename for d in all_docs]]
+    scored_groups = []
+    for group in similar_groups:
+        score = sum(1 for f in group.source_files if f in unused_names)
+        scored_groups.append((score, group))
+    scored_groups.sort(key=lambda x: -x[0])
+
+    top_score = scored_groups[0][0]
+    top_groups = [g for s, g in scored_groups if s == top_score]
+    group = random.choice(top_groups)
+
+    candidate_files = [
+        f for f in group.source_files if f in [d.filename for d in all_docs]
+    ]
 
     if len(candidate_files) < 2:
-        # 如果相似组源文件不足 2 个，退回到随机模式
         print(f"[选取] 相似组 '{group.reason}' 源文件不足，退回随机模式")
-        primary = random.choice(all_docs)
+        pool = unused if unused else all_docs
+        primary = random.choice(pool)
         return SelectionResult(
             selected_docs=[primary.filename],
             selection_mode="单API",
             primary_doc=primary.filename,
         )
 
-    # 选取 2-3 个文档
     select_count = min(random.choice([2, 3]), len(candidate_files))
     selected = random.sample(candidate_files, select_count)
 
@@ -122,26 +166,45 @@ def _comparison_mode(
     )
 
 
+def _comparison_mode_for_primary(
+    primary: DocSummary,
+    all_docs: list[DocSummary],
+    similar_groups: list[SimilarGroup],
+) -> SelectionResult:
+    """围绕预分配主文档构造对比选取结果。"""
+    group = random.choice(similar_groups)
+    known_names = {doc.filename for doc in all_docs}
+    candidates = [
+        name
+        for name in group.source_files
+        if name in known_names and name != primary.filename
+    ]
+    extra_count = min(random.choice([1, 2]), len(candidates))
+    selected = [primary.filename, *random.sample(candidates, extra_count)]
+    print(f"[选取] 对比模式 - 相似组: {group.reason}")
+    print(f"[选取] 选取文档: {selected}")
+    return SelectionResult(
+        selected_docs=selected,
+        selection_mode="多API对比",
+        primary_doc=primary.filename,
+    )
+
+
 def _find_related_docs(
     primary: DocSummary,
     scan_result: ScanResult,
-    exclude: List[str] = None
-) -> List[str]:
-    """
-    根据主文档查找相关的其他文档。
-    优先从相似组中查找同组的其他文档，其次按模块匹配。
-    """
+    exclude: list[str] | None = None,
+) -> list[str]:
+    """按相似组、模块和随机回退顺序查找关联文档。"""
     exclude = set(exclude or [])
     related = []
 
-    # 1. 从相似组中查找
     for group in scan_result.similar_groups:
         if primary.filename in group.source_files:
             for f in group.source_files:
                 if f not in exclude and f not in related:
                     related.append(f)
 
-    # 2. 按模块匹配
     if len(related) < MAX_EXTRA_DOCS:
         for doc in scan_result.doc_summaries:
             if doc.filename in exclude or doc.filename in related:
@@ -151,11 +214,9 @@ def _find_related_docs(
                 if len(related) >= MAX_EXTRA_DOCS:
                     break
 
-    # 3. 如果还不够，随机补充
     if not related:
         remaining = [
-            d.filename for d in scan_result.doc_summaries
-            if d.filename not in exclude
+            d.filename for d in scan_result.doc_summaries if d.filename not in exclude
         ]
         if remaining:
             related = random.sample(remaining, min(MAX_EXTRA_DOCS, len(remaining)))
