@@ -5,6 +5,9 @@ Zvec，生产集合为 `ascendc_api`。
 
 第一次使用项目请先阅读 [快速开始](docs/quick-start.md)。
 
+定时增量刷新官网 Markdown 请阅读
+[文档同步初始化与运维](docs/document-sync-setup.md)。
+
 ## 启动 Zvec Studio
 
 在项目根目录执行：

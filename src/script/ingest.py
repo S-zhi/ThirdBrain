@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 from collections import Counter
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -47,6 +49,7 @@ class ApiDocumentRecord(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     chunk_id: str = Field(min_length=1)
+    schema_version: str = "1.0"
     name: str = Field(min_length=1)
     namespace: str = Field(min_length=1)
     language: str = "cpp"
@@ -72,6 +75,9 @@ class ApiDocumentRecord(BaseModel):
             return value
 
         normalized = dict(value)
+        raw_value = normalized.get("raw")
+        if not normalized.get("schema_version") and isinstance(raw_value, dict):
+            normalized["schema_version"] = str(raw_value.get("schema_version") or "1.0")
         signature_value = normalized.get("signature") or normalized.get("signatures")
         normalized["signature"] = _normalize_signature(signature_value)
 
@@ -91,6 +97,168 @@ class ApiDocumentRecord(BaseModel):
                 for field in ("name", "namespace", "description")
             ).strip()
         return normalized
+
+
+def _unwrap_value(value: Any) -> Any:
+    """读取 Schema 2.1 的 ``{value, is_ai}`` 包装值。"""
+    return value.get("value") if isinstance(value, dict) and "value" in value else value
+
+
+def _v21_text(value: Any) -> str:
+    """把 Schema 2.1 标量包装归一化成字符串。"""
+    unwrapped = _unwrap_value(value)
+    return str(unwrapped).strip() if unwrapped is not None else ""
+
+
+def _v21_text_list(value: Any) -> list[str]:
+    """把 Schema 2.1 文本项列表归一化成纯字符串列表。"""
+    if not isinstance(value, list):
+        return []
+    return [text for item in value if (text := _v21_text(item))]
+
+
+def _render_parameter_markdown(
+    input_parameters: list[dict[str, Any]],
+    output_parameters: list[dict[str, Any]],
+) -> str:
+    """把 Schema 2.1 出入参渲染成现有 parameters_md 字段。"""
+    sections: list[str] = []
+    for title, parameters in (
+        ("Input Parameters", input_parameters),
+        ("Output Parameters", output_parameters),
+    ):
+        if not parameters:
+            continue
+        lines = [f"### {title}", "", "| Name | Type | Description |", "|---|---|---|"]
+        for parameter in parameters:
+            lines.append(
+                "| {name} | {type} | {description} |".format(
+                    name=str(parameter.get("name") or "").replace("|", r"\|"),
+                    type=str(parameter.get("type") or "").replace("|", r"\|"),
+                    description=str(parameter.get("description") or "").replace("|", r"\|"),
+                )
+            )
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _render_v21_body(document: dict[str, Any]) -> str:
+    """把一个 Schema 2.1 document.use 渲染为 Zvec 返回用 Markdown。"""
+    use = document["use"]
+    function_details = use["function_details"]
+    sections: list[str] = [f"# {document['name']}"]
+    summary = _v21_text(use["summary"])
+    description = _v21_text(use["description"])
+    signature = _v21_text(function_details["signature"])
+    prerequisites = _v21_text_list(use["prerequisites"])
+    examples = _v21_text_list(use["examples"])
+    if summary:
+        sections.extend(["", summary])
+    if description:
+        sections.extend(["", "## Description", "", description])
+    if prerequisites:
+        sections.extend(
+            ["", "## Prerequisites", "", *[f"- {item}" for item in prerequisites]]
+        )
+    if signature:
+        sections.extend(["", "## Signature", "", "```cpp", signature, "```"])
+    parameters_md = _render_parameter_markdown(
+        function_details["input_parameters"],
+        function_details["output_parameters"],
+    )
+    if parameters_md:
+        sections.extend(["", parameters_md])
+    fields = use["data_structure"]["fields"]
+    if fields:
+        sections.extend(
+            [
+                "",
+                "## Data Structure Fields",
+                "",
+                "| Name | Type | Description |",
+                "|---|---|---|",
+            ]
+        )
+        for field in fields:
+            sections.append(
+                f"| {field.get('name', '')} | {field.get('type', '')} | "
+                f"{field.get('description', '')} |"
+            )
+    if examples:
+        sections.extend(["", "## Examples"])
+        for example in examples:
+            sections.extend(["", "```cpp", example, "```"])
+    return "\n".join(sections).strip()
+
+
+def project_v21_document(
+    package: Mapping[str, Any],
+    document: Mapping[str, Any],
+) -> dict[str, Any]:
+    """把 Schema 2.1 嵌套文档投影成现有 Zvec ORM 所需的扁平记录。"""
+    name = str(document.get("name") or "").strip()
+    namespace = str(document.get("namespace") or "").strip()
+    version = str(document.get("version") or "").strip()
+    language = str(document.get("language") or "cpp").strip()
+    if not name or not namespace or not version:
+        raise IngestInputError("Schema 2.1 document 缺少 name/namespace/version")
+    use = document.get("use")
+    if not isinstance(use, dict):
+        raise IngestInputError(f"Schema 2.1 document {name!r} 缺少 use")
+    function_details = use.get("function_details")
+    data_structure = use.get("data_structure")
+    if not isinstance(function_details, dict) or not isinstance(data_structure, dict):
+        raise IngestInputError(f"Schema 2.1 document {name!r} 的 use 结构不完整")
+    input_parameters = function_details.get("input_parameters") or []
+    output_parameters = function_details.get("output_parameters") or []
+    if not isinstance(input_parameters, list) or not isinstance(output_parameters, list):
+        raise IngestInputError(f"Schema 2.1 document {name!r} 的参数必须是列表")
+    normalized_name = re.sub(r"[^0-9A-Za-z_.-]+", "_", name).strip("_") or name
+    namespace_has_version = version in namespace.split(".")
+    identity_namespace = namespace if namespace_has_version else f"{namespace}.{version}"
+    chunk_id = f"{identity_namespace}.{normalized_name}"
+    summary = _v21_text(use.get("summary"))
+    description = _v21_text(use.get("description"))
+    category = _v21_text(use.get("category")) or "function"
+    signature = _v21_text(function_details.get("signature"))
+    examples = _v21_text_list(use.get("examples"))
+    product_support = use.get("product_support") or []
+    if not isinstance(product_support, list):
+        raise IngestInputError(f"Schema 2.1 document {name!r} 的 product_support 必须是列表")
+    source = package.get("source")
+    source_metadata = source if isinstance(source, Mapping) else {}
+    projected_document = dict(document)
+    return {
+        "schema_version": "2.1",
+        "chunk_id": chunk_id,
+        "name": name,
+        "namespace": namespace,
+        "language": language,
+        "category": category,
+        "title": f"{name} {namespace} {summary}".strip(),
+        "description": description,
+        "params_md": _render_parameter_markdown(input_parameters, output_parameters),
+        "returns": json.dumps(output_parameters, ensure_ascii=False, sort_keys=True),
+        "examples": examples,
+        "body_md": _render_v21_body(projected_document),
+        "product_support": [
+            {
+                "product": str(item.get("product") or ""),
+                "supported": bool(item.get("supported", False)),
+            }
+            for item in product_support
+            if isinstance(item, Mapping) and item.get("product")
+        ],
+        "signature": signature,
+        "deprecated": False,
+        "deprecation_note": "",
+        "raw": {
+            "schema_version": "2.1",
+            "source_path": source_metadata.get("source_path"),
+            "source_url": source_metadata.get("source_url"),
+            "content_hash": source_metadata.get("content_hash"),
+        },
+    }
 
 
 class IngestError(BaseModel):
@@ -207,7 +375,16 @@ def parse_yaml_documents(content: str, source: str) -> list[ApiDocumentRecord]:
             nested = document["documents"]
             if not isinstance(nested, list):
                 raise IngestInputError(f"{source}: documents 必须是列表")
-            candidates.extend(nested)
+            if str(document.get("schema_version")) == "2.1":
+                candidates.extend(
+                    project_v21_document(document, item)
+                    for item in nested
+                    if isinstance(item, Mapping)
+                )
+                if any(not isinstance(item, Mapping) for item in nested):
+                    raise IngestInputError(f"{source}: Schema 2.1 documents 必须全部是 mapping")
+            else:
+                candidates.extend(nested)
         elif isinstance(document, list):
             candidates.extend(document)
         else:
@@ -311,7 +488,8 @@ def run_ingest(
     preview_limit: int = 1,
 ) -> IngestResult:
     """执行发现、解析、预览/写向量库，并保证最终 Record 落盘。"""
-    collection_name = collection or get_config().zvec.default_collection
+    config = get_config()
+    collection_name = collection or config.zvec.default_collection
     run_record = IngestRunRecord(
         source=source,
         sub_directory=sub_directory,
@@ -349,6 +527,20 @@ def run_ingest(
             )
 
     run_record.parsed_count = len(records)
+    schema_versions = {record.schema_version for record in records}
+    if collection is None and schema_versions == {"2.1"}:
+        collection_name = config.zvec.shadow_collection
+        run_record.collection = collection_name
+    elif collection is None and "2.1" in schema_versions and len(schema_versions) > 1:
+        run_record.errors.append(
+            IngestError(
+                source=source,
+                stage="parse",
+                message="同一批次混合 Schema 2.1 与旧版本；请拆分批次或显式指定 --collection",
+            )
+        )
+        records = []
+        run_record.parsed_count = 0
     accepted_records, duplicate_errors = reject_duplicate_documents(records)
     run_record.errors.extend(duplicate_errors)
     run_record.skipped_count = len(records) - len(accepted_records)
@@ -384,7 +576,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", help="本地 YAML、远程 YAML URL，或包含 Sub 的目录")
     parser.add_argument("--sub-dir", default=DEFAULT_SUB_DIRECTORY, help="递归扫描的目录名")
-    parser.add_argument("--collection", help="Zvec collection 名；默认读取 config.yaml")
+    parser.add_argument(
+        "--collection",
+        help="Zvec collection 名；2.1 默认写 shadow_collection，旧版写 default_collection",
+    )
     parser.add_argument(
         "--record-dir",
         type=Path,

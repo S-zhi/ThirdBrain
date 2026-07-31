@@ -20,6 +20,12 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import yaml
+from config import get_config
+from src.script.markdown_yaml_v21 import (
+    PipelineResult,
+    run_pipeline,
+    validate_v21,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 API_REFERENCE_DIR = PROJECT_ROOT / "API参考"
@@ -958,6 +964,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_MAX_COMPLETION_TOKENS,
         help="模型最大输出 token 数",
     )
+    parser.add_argument(
+        "--debug-dir",
+        type=Path,
+        help="可选：保存预处理、槽位证据、AI 请求和响应等阶段产物",
+    )
     return parser.parse_args(argv)
 
 
@@ -1007,9 +1018,7 @@ def extract_source_url(markdown: str) -> str | None:
     if source_urls:
         return source_urls[0]
     if invalid_values:
-        raise ExtractionError(
-            f"Markdown 来源字段不包含有效 HTTP(S) URL: {invalid_values}"
-        )
+        raise ExtractionError(f"Markdown 来源字段不包含有效 HTTP(S) URL: {invalid_values}")
     return None
 
 
@@ -1132,7 +1141,7 @@ def build_identity_supplement_prompt(
 
 要求：
 1. 只补充 missing_fields 中列出的字段，不修改已有字段。
-2. category 只能是：{', '.join(sorted(API_CATEGORIES))}。
+2. category 只能是：{", ".join(sorted(API_CATEGORIES))}。
 3. 每个补充值必须给出简短依据，明确这是 AI 推断而不是原文明示。
 4. 如果存在多个合理候选，选择与全文、路径和产品命名最一致的一个。
 5. 只输出合法 YAML，不输出代码围栏或额外说明。
@@ -1194,7 +1203,9 @@ def apply_identity_supplements(
             if field == "category" and value not in API_CATEGORIES:
                 continue
             document[field] = value.strip()
-            reason = _stringify(reason_mapping.get(field), optional=True) or "基于完整文档上下文推断"
+            reason = (
+                _stringify(reason_mapping.get(field), optional=True) or "基于完整文档上下文推断"
+            )
             append_unique(notes, f"AI 补全 {field}={value.strip()!r}；依据：{reason}")
 
 
@@ -1300,21 +1311,23 @@ def print_minimax_quota(api_key: str) -> None:
 
 
 def _call_minimax_raw(
-    prompt: str,
+    user_content: str | list[dict[str, Any]],
     api_key: str,
     model: str,
     base_url: str,
     timeout: float,
     max_completion_tokens: int,
     temperature: float,
+    system_prompt: str | None = SYSTEM_PROMPT,
 ) -> str:
     """向 MiniMax 发起一次非流式请求并返回模型文本。"""
+    messages: list[dict[str, Any]] = []
+    if system_prompt:
+        messages.append({"role": "system", "name": "API Doc Extractor", "content": system_prompt})
+    messages.append({"role": "user", "name": "User", "content": user_content})
     payload = {
         "model": model,
-        "messages": [
-            {"role": "system", "name": "API Doc Extractor", "content": SYSTEM_PROMPT},
-            {"role": "user", "name": "User", "content": prompt},
-        ],
+        "messages": messages,
         "stream": False,
         "temperature": temperature,
         "top_p": 0.95,
@@ -1351,16 +1364,10 @@ def _call_minimax_raw(
             f"{base_response.get('status_msg', 'unknown error')}"
         )
     choices = response_data.get("choices")
-    if (
-        not isinstance(choices, list)
-        or not choices
-        or not isinstance(choices[0], Mapping)
-    ):
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], Mapping):
         raise ExtractionError("MiniMax 返回体缺少 choices[0]")
     if choices[0].get("finish_reason") == "length":
-        raise ExtractionError(
-            "MiniMax 输出因长度上限被截断，请提高 --max-completion-tokens"
-        )
+        raise ExtractionError("MiniMax 输出因长度上限被截断，请提高 --max-completion-tokens")
     message = choices[0].get("message")
     if not isinstance(message, Mapping):
         raise ExtractionError("MiniMax 返回体缺少 choices[0].message")
@@ -1382,13 +1389,55 @@ def call_minimax(
     """调用 MiniMax，并保证请求结束后查询和打印当前 Token Plan 额度。"""
     try:
         return _call_minimax_raw(
-            prompt=prompt,
+            user_content=prompt,
             api_key=api_key,
             model=model,
             base_url=base_url,
             timeout=timeout,
             max_completion_tokens=max_completion_tokens,
             temperature=temperature,
+        )
+    finally:
+        print_minimax_quota(api_key)
+
+
+def build_multimodal_user_content(
+    prompt: str,
+    images: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """按 resource_id 顺序构造 OpenAI 兼容的图片 URL 消息块。"""
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image in images:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": image["url"]},
+            }
+        )
+    return content
+
+
+def call_minimax_multimodal(
+    prompt: str,
+    images: list[dict[str, str]],
+    api_key: str,
+    model: str,
+    base_url: str,
+    timeout: float,
+    max_completion_tokens: int,
+    temperature: float = 1.0,
+) -> str:
+    """把图片 URL 作为多模态消息块发送，并返回图片理解 YAML。"""
+    try:
+        return _call_minimax_raw(
+            user_content=build_multimodal_user_content(prompt, images),
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            max_completion_tokens=max_completion_tokens,
+            temperature=temperature,
+            system_prompt=None,
         )
     finally:
         print_minimax_quota(api_key)
@@ -1601,9 +1650,7 @@ def _bool(value: Any, path: str, warnings: list[str]) -> bool:
     return False
 
 
-def _enum_value(
-    value: Any, allowed: set[str], path: str, warnings: list[str]
-) -> str | None:
+def _enum_value(value: Any, allowed: set[str], path: str, warnings: list[str]) -> str | None:
     """规范可空枚举值，非法枚举统一变为 null。"""
     normalized = _stringify(value, optional=True)
     if normalized is None:
@@ -1641,9 +1688,7 @@ def _normalize_template_parameter(
     }
 
 
-def _normalize_constraint(
-    item: dict[str, Any], path: str, warnings: list[str]
-) -> dict[str, Any]:
+def _normalize_constraint(item: dict[str, Any], path: str, warnings: list[str]) -> dict[str, Any]:
     """把一条约束规范为固定子结构和受限枚举。"""
     _warn_unknown_fields(item, {"type", "description", "condition"}, path, warnings)
     return {
@@ -1653,9 +1698,7 @@ def _normalize_constraint(
     }
 
 
-def _normalize_parameter(
-    item: dict[str, Any], path: str, warnings: list[str]
-) -> dict[str, Any]:
+def _normalize_parameter(item: dict[str, Any], path: str, warnings: list[str]) -> dict[str, Any]:
     """把一条普通参数规范为固定子结构。"""
     allowed = {"name", "type", "direction", "required", "default", "description", "constraints"}
     _warn_unknown_fields(item, allowed, path, warnings)
@@ -1692,9 +1735,7 @@ def _normalize_product_support(
     }
 
 
-def _normalize_related(
-    item: dict[str, Any], path: str, warnings: list[str]
-) -> dict[str, Any]:
+def _normalize_related(item: dict[str, Any], path: str, warnings: list[str]) -> dict[str, Any]:
     """把一条关联 API 信息规范为固定子结构。"""
     _warn_unknown_fields(item, {"name", "url", "relation"}, path, warnings)
     return {
@@ -1716,9 +1757,7 @@ def _normalize_unresolved_section(
     }
 
 
-def _normalize_return_contract(
-    value: Any, path: str, warnings: list[str]
-) -> dict[str, Any]:
+def _normalize_return_contract(value: Any, path: str, warnings: list[str]) -> dict[str, Any]:
     """把返回值契约规范为固定子结构。"""
     item = _mapping(value, path, warnings)
     allowed = {"type", "description", "possible_values", "error_conditions"}
@@ -1801,16 +1840,10 @@ def _normalize_document(
     active_hints = hints if apply_hints else {}
 
     name = _apply_hint(document, "name", active_hints.get("name"), path, errors)
-    namespace = _apply_hint(
-        document, "namespace", active_hints.get("namespace"), path, errors
-    )
+    namespace = _apply_hint(document, "namespace", active_hints.get("namespace"), path, errors)
     version = _apply_hint(document, "version", active_hints.get("version"), path, errors)
-    language = _apply_hint(
-        document, "language", active_hints.get("language"), path, errors
-    )
-    category = _apply_hint(
-        document, "category", active_hints.get("category"), path, errors
-    )
+    language = _apply_hint(document, "language", active_hints.get("language"), path, errors)
+    category = _apply_hint(document, "category", active_hints.get("category"), path, errors)
     module = _apply_hint(document, "module", active_hints.get("module"), path, errors)
     category = _enum_value(category, API_CATEGORIES, f"{path}.category", warnings)
     if namespace and version and version not in namespace.split("."):
@@ -1818,16 +1851,13 @@ def _normalize_document(
         namespace = f"{namespace.rstrip('.')}.{version}"
         append_unique(
             warnings,
-            f"{path}.namespace 缺少 version 段，已从 {original_namespace!r} "
-            f"规范为 {namespace!r}",
+            f"{path}.namespace 缺少 version 段，已从 {original_namespace!r} 规范为 {namespace!r}",
         )
 
     chunk_id_hint = active_hints.get("chunk_id")
     chunk_id = _apply_hint(document, "chunk_id", chunk_id_hint, path, errors)
     normalized_name = _normalized_api_name(name) if name else ""
-    expected_chunk_id = (
-        f"{namespace}.{normalized_name}" if namespace and normalized_name else None
-    )
+    expected_chunk_id = f"{namespace}.{normalized_name}" if namespace and normalized_name else None
     if chunk_id_hint is None and expected_chunk_id is not None:
         if chunk_id is not None and chunk_id != expected_chunk_id:
             append_unique(
@@ -1851,9 +1881,7 @@ def _normalize_document(
         "chunk_id": chunk_id,
     }
     missing_identity = [field for field, field_value in identity.items() if not field_value]
-    pending_fields = [
-        f"{field} 缺失，等待调用方提供可靠元数据" for field in missing_identity
-    ]
+    pending_fields = [f"{field} 缺失，等待调用方提供可靠元数据" for field in missing_identity]
     if missing_identity:
         append_unique(
             errors,
@@ -1874,9 +1902,7 @@ def _normalize_document(
         )
     ]
     template_parameters = [
-        _normalize_template_parameter(
-            item, f"{path}.template_parameters[{item_index}]", warnings
-        )
+        _normalize_template_parameter(item, f"{path}.template_parameters[{item_index}]", warnings)
         for item_index, item in enumerate(
             _mapping_list(
                 document.get("template_parameters"),
@@ -1898,13 +1924,9 @@ def _normalize_document(
         )
     ]
     product_support = [
-        _normalize_product_support(
-            item, f"{path}.product_support[{item_index}]", warnings
-        )
+        _normalize_product_support(item, f"{path}.product_support[{item_index}]", warnings)
         for item_index, item in enumerate(
-            _mapping_list(
-                document.get("product_support"), f"{path}.product_support", warnings
-            )
+            _mapping_list(document.get("product_support"), f"{path}.product_support", warnings)
         )
     ]
     related = [
@@ -1935,9 +1957,7 @@ def _normalize_document(
         "title": _stringify(document.get("title")),
         "description": _stringify(document.get("description")),
         "summary": _stringify(document.get("summary"), optional=True),
-        "layman_explanation": _stringify(
-            document.get("layman_explanation"), optional=True
-        ),
+        "layman_explanation": _stringify(document.get("layman_explanation"), optional=True),
         "signature": _stringify(document.get("signature")),
         "signatures": signatures,
         "template_parameters": template_parameters,
@@ -2026,9 +2046,7 @@ def normalize_extraction(
     unresolved_sections = [
         _normalize_unresolved_section(item, f"unresolved_sections[{index}]", warnings)
         for index, item in enumerate(
-            _mapping_list(
-                result.get("unresolved_sections"), "unresolved_sections", warnings
-            )
+            _mapping_list(result.get("unresolved_sections"), "unresolved_sections", warnings)
         )
     ]
     original_validation = _mapping(result.get("validation"), "validation", warnings)
@@ -2079,18 +2097,14 @@ def dump_yaml(result: dict[str, Any]) -> str:
     )
 
 
-def _require_exact_fields(
-    value: Any, fields: tuple[str, ...], path: str
-) -> dict[str, Any]:
+def _require_exact_fields(value: Any, fields: tuple[str, ...], path: str) -> dict[str, Any]:
     """校验 mapping 恰好包含固定 Schema 规定的字段。"""
     if not isinstance(value, dict):
         raise ExtractionError(f"生成结果 {path} 必须是 mapping")
     missing = sorted(set(fields) - set(value))
     unknown = sorted(set(value) - set(fields))
     if missing or unknown:
-        raise ExtractionError(
-            f"生成结果 {path} 字段不符合 Schema；缺失={missing}，额外={unknown}"
-        )
+        raise ExtractionError(f"生成结果 {path} 字段不符合 Schema；缺失={missing}，额外={unknown}")
     return value
 
 
@@ -2152,12 +2166,8 @@ def validate_serialized_yaml(yaml_text: str) -> None:
         "related": ("name", "url", "relation"),
     }
     for index, document_value in enumerate(root["documents"]):
-        document = _require_exact_fields(
-            document_value, DOCUMENT_FIELDS, f"documents[{index}]"
-        )
-        raw = _require_exact_fields(
-            document["raw"], RAW_FIELDS, f"documents[{index}].raw"
-        )
+        document = _require_exact_fields(document_value, DOCUMENT_FIELDS, f"documents[{index}]")
+        raw = _require_exact_fields(document["raw"], RAW_FIELDS, f"documents[{index}].raw")
         return_contract = _require_exact_fields(
             document["return_contract"],
             ("type", "description", "possible_values", "error_conditions"),
@@ -2168,8 +2178,7 @@ def validate_serialized_yaml(yaml_text: str) -> None:
                 not isinstance(item, str) for item in return_contract[field]
             ):
                 raise ExtractionError(
-                    f"生成结果 documents[{index}].return_contract.{field} "
-                    "必须是纯字符串列表"
+                    f"生成结果 documents[{index}].return_contract.{field} 必须是纯字符串列表"
                 )
         for field in list_fields:
             items = document[field]
@@ -2177,9 +2186,7 @@ def validate_serialized_yaml(yaml_text: str) -> None:
                 raise ExtractionError(f"生成结果 documents[{index}].{field} 必须是列表")
             if field in {"examples", "negative_examples"}:
                 if any(not isinstance(item, str) for item in items):
-                    raise ExtractionError(
-                        f"生成结果 documents[{index}].{field} 必须是纯字符串列表"
-                    )
+                    raise ExtractionError(f"生成结果 documents[{index}].{field} 必须是纯字符串列表")
                 continue
             for item_index, item in enumerate(items):
                 nested_item = _require_exact_fields(
@@ -2202,16 +2209,12 @@ def validate_serialized_yaml(yaml_text: str) -> None:
                             f"constraints[{constraint_index}]",
                         )
         if raw["extraction_status"] not in {"complete", "incomplete"}:
-            raise ExtractionError(
-                f"生成结果 documents[{index}].raw.extraction_status 非法"
-            )
+            raise ExtractionError(f"生成结果 documents[{index}].raw.extraction_status 非法")
         for field in ("pending_fields", "extraction_notes"):
             if not isinstance(raw[field], list) or any(
                 not isinstance(item, str) for item in raw[field]
             ):
-                raise ExtractionError(
-                    f"生成结果 documents[{index}].raw.{field} 必须是纯字符串列表"
-                )
+                raise ExtractionError(f"生成结果 documents[{index}].raw.{field} 必须是纯字符串列表")
     for index, item in enumerate(root["unresolved_sections"]):
         _require_exact_fields(
             item, ("heading", "content_md", "reason"), f"unresolved_sections[{index}]"
@@ -2232,12 +2235,8 @@ def validate_ready_for_ingest(result: dict[str, Any]) -> None:
         for field in identity_fields:
             value = document[field]
             if not isinstance(value, str) or not value.strip():
-                raise ExtractionError(
-                    f"documents[{index}].{field} 缺失，结果不能进入正式索引"
-                )
-        expected_chunk_id = (
-            f"{document['namespace']}.{_normalized_api_name(document['name'])}"
-        )
+                raise ExtractionError(f"documents[{index}].{field} 缺失，结果不能进入正式索引")
+        expected_chunk_id = f"{document['namespace']}.{_normalized_api_name(document['name'])}"
         if document["chunk_id"] != expected_chunk_id:
             raise ExtractionError(
                 f"documents[{index}].chunk_id 非法: {document['chunk_id']!r}，"
@@ -2249,9 +2248,7 @@ def validate_ready_for_ingest(result: dict[str, Any]) -> None:
             )
         raw = document["raw"]
         if raw["extraction_status"] != "complete" or raw["pending_fields"]:
-            raise ExtractionError(
-                f"documents[{index}].raw 仍有未完成字段，结果不能进入正式索引"
-            )
+            raise ExtractionError(f"documents[{index}].raw 仍有未完成字段，结果不能进入正式索引")
 
 
 def write_yaml(output_path: Path, yaml_text: str) -> None:
@@ -2265,11 +2262,49 @@ def write_yaml(output_path: Path, yaml_text: str) -> None:
         raise ExtractionError(f"写入 YAML 失败: {exc}") from exc
 
 
+def write_v21_debug_artifacts(
+    root: Path,
+    source_path: Path,
+    result: PipelineResult,
+    yaml_text: str,
+) -> Path:
+    """把 Schema 2.1 Pipeline 的各阶段产物写入独立调试目录。"""
+    suffix = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()[:8]
+    target = root.expanduser().resolve() / f"{source_path.stem}-{suffix}"
+    target.mkdir(parents=True, exist_ok=True)
+    artifacts = {
+        "01_source.md": result.document["source"]["source_markdown"],
+        "02_preprocessed.md": result.document["source"]["preprocess_markdown"],
+        "03_slot_evidence.yaml": yaml.safe_dump(
+            result.evidence,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        "04_image_prompts.yaml": yaml.safe_dump(
+            result.image_prompts,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        "05_image_responses.yaml": yaml.safe_dump(
+            result.image_responses,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        "06_ai_prompt.txt": result.ai_prompt or "",
+        "07_ai_response.txt": result.ai_response or "",
+        "08_result.yaml": yaml_text,
+    }
+    for filename, content in artifacts.items():
+        (target / filename).write_text(content, encoding="utf-8")
+    return target
+
+
 def run_single(args: argparse.Namespace) -> Path:
-    """执行单个 Markdown 的提取、AI 补全、校验和 YAML 落盘流程。"""
+    """执行 Schema 2.1 预处理、一次 AI 槽位填充和 YAML 落盘流程。"""
+    pipeline_config = get_config().markdown_to_yaml
     api_key = os.environ.get("MINIMAX_API_KEY")
-    if not api_key:
-        raise ExtractionError("缺少环境变量 MINIMAX_API_KEY，请先设置后再运行")
+    if pipeline_config.ai.enabled and not api_key:
+        raise ExtractionError("AI 节点已启用，但缺少环境变量 MINIMAX_API_KEY")
     if args.timeout <= 0:
         raise ExtractionError("--timeout 必须大于 0")
     if args.max_completion_tokens <= 0:
@@ -2277,65 +2312,72 @@ def run_single(args: argparse.Namespace) -> Path:
 
     document_path, markdown = read_markdown(args.document_path)
     source_url = extract_source_url(markdown)
-    content_hash = calculate_content_hash(markdown)
     hints = resolve_authoritative_hints(
         args,
         document_path,
         markdown,
         source_url,
     )
-    prompt = build_prompt(
-        markdown,
-        document_path,
-        source_url,
-        content_hash,
-        args.source_revision,
-        hints,
-    )
-    response_text = call_minimax(
-        prompt=prompt,
-        api_key=api_key,
-        model=args.model,
-        base_url=args.base_url,
-        timeout=args.timeout,
-        max_completion_tokens=args.max_completion_tokens,
-    )
-    result = parse_yaml_response_with_repair(
-        response_text,
-        api_key=api_key,
-        model=args.model,
-        base_url=args.base_url,
-        timeout=args.timeout,
-        max_completion_tokens=args.max_completion_tokens,
-    )
-    normalized_result = normalize_extraction(
-        result=result,
-        markdown=markdown,
-        source_path=document_path,
-        source_url=source_url,
-        content_hash=content_hash,
-        source_revision=args.source_revision,
-        hints=hints,
-    )
-    normalized_result = supplement_missing_identity_with_ai(
-        result=normalized_result,
-        markdown=markdown,
-        source_path=document_path,
-        source_url=source_url,
-        content_hash=content_hash,
-        source_revision=args.source_revision,
-        hints=hints,
-        api_key=api_key,
-        model=args.model,
-        base_url=args.base_url,
-        timeout=args.timeout,
-        max_completion_tokens=args.max_completion_tokens,
-    )
+
+    def ai_call(prompt: str) -> str:
+        """对所有启用节点执行一次 MiniMax 槽位填充。"""
+        assert api_key is not None
+        return call_minimax(
+            prompt=prompt,
+            api_key=api_key,
+            model=args.model,
+            base_url=args.base_url,
+            timeout=args.timeout,
+            max_completion_tokens=args.max_completion_tokens,
+            temperature=0.1,
+        )
+
+    def image_ai_call(prompt: str, images: list[dict[str, str]]) -> str:
+        """通过图片 URL 多模态输入补齐已有图片资源的 alt/title。"""
+        assert api_key is not None
+        return call_minimax_multimodal(
+            prompt=prompt,
+            images=images,
+            api_key=api_key,
+            model=args.model,
+            base_url=args.base_url,
+            timeout=args.timeout,
+            max_completion_tokens=args.max_completion_tokens,
+            temperature=0.1,
+        )
+
+    try:
+        pipeline_result = run_pipeline(
+            markdown=markdown,
+            source_path=document_path,
+            source_url=source_url,
+            hints=hints,
+            config=pipeline_config,
+            project_root=PROJECT_ROOT,
+            ai_call=ai_call if pipeline_config.ai.enabled else None,
+            image_ai_call=(
+                image_ai_call
+                if pipeline_config.ai.enabled and pipeline_config.ai.image_understanding.enabled
+                else None
+            ),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ExtractionError(f"Schema 2.1 Pipeline 失败: {exc}") from exc
     output_path = resolve_output_path(document_path, args.output)
-    validate_ready_for_ingest(normalized_result)
-    yaml_text = dump_yaml(normalized_result)
-    validate_serialized_yaml(yaml_text)
+    yaml_text = dump_yaml(pipeline_result.document)
+    try:
+        reloaded = yaml.safe_load(yaml_text)
+        validate_v21(reloaded)
+    except (TypeError, yaml.YAMLError, ValueError) as exc:
+        raise ExtractionError(f"Schema 2.1 YAML 回读校验失败: {exc}") from exc
     write_yaml(output_path, yaml_text)
+    if args.debug_dir is not None:
+        write_v21_debug_artifacts(
+            args.debug_dir,
+            document_path,
+            pipeline_result,
+            yaml_text,
+        )
     return output_path
 
 
@@ -2398,6 +2440,15 @@ def is_completed_batch_output(document_path: Path, output_path: Path) -> bool:
     try:
         yaml_text = output_path.read_text(encoding="utf-8")
         result = yaml.safe_load(yaml_text)
+        if isinstance(result, dict) and result.get("schema_version") == "2.1":
+            validate_v21(result)
+            source = result["source"]
+            markdown = document_path.read_text(encoding="utf-8")
+            return (
+                source["source_path"] in {None, str(document_path.resolve())}
+                and source["content_hash"] == f"sha256:{calculate_content_hash(markdown)}"
+                and source["source_markdown"] == markdown
+            )
         validate_serialized_yaml(yaml_text)
         validate_ready_for_ingest(result)
         source = result["source"]
@@ -2407,7 +2458,7 @@ def is_completed_batch_output(document_path: Path, output_path: Path) -> bool:
             and source["content_hash"] == calculate_content_hash(markdown)
             and result["source_markdown"] == markdown
         )
-    except (ExtractionError, OSError, UnicodeDecodeError, yaml.YAMLError, TypeError):
+    except ExtractionError, OSError, UnicodeDecodeError, yaml.YAMLError, TypeError:
         return False
 
 
@@ -2425,9 +2476,7 @@ def write_json_atomic(path: Path, value: Mapping[str, Any]) -> None:
     """原子写入批处理状态 JSON，避免中断时留下半个 Record。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_suffix(f"{path.suffix}.tmp")
-    temporary_path.write_text(
-        json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    temporary_path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary_path.replace(path)
 
 
@@ -2459,11 +2508,9 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
         raise ExtractionError("批处理不能使用 --output，请改用 --output-dir")
     supplied_hints = [field for field in HINT_FIELDS if getattr(args, field) is not None]
     if supplied_hints:
-        raise ExtractionError(
-            "批处理不能向所有文档复用身份参数: " + ", ".join(supplied_hints)
-        )
-    if not os.environ.get("MINIMAX_API_KEY"):
-        raise ExtractionError("缺少环境变量 MINIMAX_API_KEY，请先设置后再运行")
+        raise ExtractionError("批处理不能向所有文档复用身份参数: " + ", ".join(supplied_hints))
+    if get_config().markdown_to_yaml.ai.enabled and not os.environ.get("MINIMAX_API_KEY"):
+        raise ExtractionError("AI 节点已启用，但缺少环境变量 MINIMAX_API_KEY")
 
     manifest_path = args.batch_file or DEFAULT_BATCH_FILE
     resolved_manifest, documents = read_batch_manifest(manifest_path, args.limit)
@@ -2525,9 +2572,7 @@ def run_batch(args: argparse.Namespace) -> dict[str, Any]:
                 future.result()
             except Exception as exc:  # noqa: BLE001
                 state["failed_count"] += 1
-                state["errors"].append(
-                    {"source": str(document_path), "message": str(exc)}
-                )
+                state["errors"].append({"source": str(document_path), "message": str(exc)})
             else:
                 state["success_count"] += 1
                 pending_documents.discard(document_path)

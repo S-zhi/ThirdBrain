@@ -19,9 +19,125 @@ embedder:
 zvec:
   collection_path: ./data/zvec_collections
   default_collection: ascendc_api
+  # Schema 2.1 首次上线只写影子集合，确认效果后再切换 default_collection。
+  shadow_collection: ascendc_api_v21
 
 api_name:
   # 从 title 字段去掉 "{name} {namespace} " 前缀
   # 例: "DataStoreBarrier com.huawei.cann.ascendc.op.910beta3 数据同步..."
   #   → "数据同步..."
   strip_pattern: "{name} {namespace} "
+
+markdown_to_yaml:
+  # namespace/version 可由这里固定，也可由 CLI Hint 或来源 URL 确定。
+  fixed_values:
+    namespace: null
+    version: null
+    language: cpp
+
+  preprocess:
+    # 删除前会先提取资源、参数表、函数原型和示例，避免有效信息丢失。
+    # 图片相对路径统一相对于站点根目录补全，不跟随当前文档页面目录。
+    image_base_url: https://www.hiascend.com/
+    remove_footer: true
+    remove_links: true
+    remove_images: true
+    remove_code_blocks: true
+    remove_tables: true
+    remove_invalid_values:
+      - "[object Object]"
+      - "undefined"
+
+  ai:
+    enabled: true
+    # 所有启用节点合并到一次逻辑槽位填充调用。
+    single_pass: true
+    prompt_file: src/script/prompts/markdown_to_yaml_v21.md
+    max_input_chars: 120000
+
+    image_understanding:
+      # 图片处理独立控制；关闭后不会向模型发送任何图片。
+      enabled: true
+      # 提示词必须放在独立文件中，代码仅负责装配运行时图片信息。
+      prompt_file: src/script/prompts/image_resource_understanding.md
+      # 每次请求的图片数和单张图片说明长度上限。
+      max_images_per_call: 8
+      max_description_chars: 120
+
+    nodes:
+      "resources[].raw.alt":
+        enabled: true
+        mode: slot
+        allow_generate: true
+
+      "resources[].raw.title":
+        enabled: true
+        mode: slot
+        allow_generate: true
+
+      "documents[].name":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.summary":
+        enabled: true
+        mode: paragraph
+        max_chars: 120
+        allow_generate: true
+
+      "documents[].use.category":
+        enabled: true
+        mode: slot
+        allow_generate: true
+        allowed_values:
+          - function
+          - data_structure
+
+      "documents[].use.description":
+        enabled: true
+        mode: paragraph
+        max_chars: 300
+        allow_generate: true
+
+      "documents[].use.product_support":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.prerequisites":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.function_details.input_parameters":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.function_details.output_parameters":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.function_details.signature":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.data_structure.fields":
+        enabled: true
+        mode: slot
+        require_evidence: true
+        allow_generate: false
+
+      "documents[].use.examples":
+        enabled: true
+        mode: slot
+        allow_generate: true

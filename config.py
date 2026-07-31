@@ -29,6 +29,7 @@ class ConfigError(Exception):
 # 配置 dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class BailianConfig:
     """阿里百炼（DashScope）Embedding 配置块。
@@ -43,6 +44,7 @@ class BailianConfig:
     注意：API key **不**在这里出现。仅在 ``BailianEmbedder.__init__`` 时从
     ``DASHSCOPE_API_KEY`` 环境变量读 — 这条不变量是项目硬性约定。
     """
+
     model: str
     dimension: int
     max_retries: int
@@ -62,6 +64,7 @@ class LocalEmbedderConfig:
     - ``bm25_language``: 占位字段，预留给将来的多语言 BM25 切换；当前 TF-IDF
       实现对中英混排都自动处理，**实际不读**。
     """
+
     dense_model: str
     dimension: int
     bm25_language: str
@@ -75,6 +78,7 @@ class EmbedderConfig:
     切 type 而不需要重读 yaml。``type`` 字段决定 :func:`build_embedder`
     实际返回哪个 embedder。
     """
+
     type: Literal["bailian", "local"]
     bailian: BailianConfig
     local: LocalEmbedderConfig
@@ -90,9 +94,13 @@ class ZvecConfig:
       跨进程歧义。
     - ``default_collection``: :func:`get_collection_schema` / :func:`open_collection`
       等不传 name 时的默认 collection 名。
+    - ``shadow_collection``: Schema 2.1 文档首次上线时写入的影子 collection，
+      与现有默认 collection 隔离。
     """
+
     collection_path: str
     default_collection: str
+    shadow_collection: str
 
 
 @dataclass(frozen=True)
@@ -106,7 +114,73 @@ class ApiNameConfig:
     默认值 ``"{name} {namespace} "`` 适配目前 ingest 产出的 title 格式。
     如果将来 ingest 格式变了，**只需要改 yaml 不用动代码**。
     """
+
     strip_pattern: str  # 例: "{name} {namespace} "
+
+
+@dataclass(frozen=True)
+class MarkdownPreprocessConfig:
+    """Markdown 进入 AI 之前的确定性清理规则。"""
+
+    image_base_url: str
+    remove_footer: bool
+    remove_links: bool
+    remove_images: bool
+    remove_code_blocks: bool
+    remove_tables: bool
+    remove_invalid_values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MarkdownFixedValuesConfig:
+    """提示词和最终结果共同使用的固定 API 身份值。"""
+
+    namespace: str | None
+    version: str | None
+    language: str
+
+
+@dataclass(frozen=True)
+class MarkdownAiNodeConfig:
+    """单个 Schema 路径是否经过 AI 以及允许的生成范围。"""
+
+    enabled: bool
+    mode: Literal["slot", "paragraph"]
+    max_chars: int | None
+    require_evidence: bool
+    allow_generate: bool
+    allowed_values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MarkdownImageAiConfig:
+    """图片理解调用的独立开关、提示词和输出限制。"""
+
+    enabled: bool
+    prompt_file: str
+    max_images_per_call: int
+    max_description_chars: int
+
+
+@dataclass(frozen=True)
+class MarkdownAiConfig:
+    """一次槽位填充调用及其字段级开关。"""
+
+    enabled: bool
+    single_pass: bool
+    prompt_file: str
+    max_input_chars: int
+    image_understanding: MarkdownImageAiConfig
+    nodes: dict[str, MarkdownAiNodeConfig]
+
+
+@dataclass(frozen=True)
+class MarkdownToYamlConfig:
+    """Markdown 到 Schema 2.1 YAML 的完整流水线配置。"""
+
+    fixed_values: MarkdownFixedValuesConfig
+    preprocess: MarkdownPreprocessConfig
+    ai: MarkdownAiConfig
 
 
 @dataclass(frozen=True)
@@ -115,9 +189,11 @@ class Config:
 
     顶层容器。``get_config()`` 返回它；任何模块想读配置都应走单例。
     """
+
     embedder: EmbedderConfig
     zvec: ZvecConfig
     api_name: ApiNameConfig
+    markdown_to_yaml: MarkdownToYamlConfig
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +207,7 @@ ENV_DASHSCOPE_API_KEY = "DASHSCOPE_API_KEY"
 # ---------------------------------------------------------------------------
 # 加载逻辑
 # ---------------------------------------------------------------------------
+
 
 def _read_yaml(path: Path) -> dict:
     """读取 yaml 文件并返回原始 dict。
@@ -208,6 +285,7 @@ def load_config(config_path: str | Path = "config.yaml") -> Config:
     zvec_cfg = ZvecConfig(
         collection_path=zvec_raw.get("collection_path", "./data/zvec_collections"),
         default_collection=zvec_raw.get("default_collection", "ascendc_api"),
+        shadow_collection=zvec_raw.get("shadow_collection", "ascendc_api_v21"),
     )
 
     # ---- api_name ----
@@ -216,10 +294,82 @@ def load_config(config_path: str | Path = "config.yaml") -> Config:
         strip_pattern=apiname_raw.get("strip_pattern", "{name} {namespace} "),
     )
 
+    # ---- markdown_to_yaml ----
+    markdown_raw = raw.get("markdown_to_yaml") or {}
+    fixed_raw = markdown_raw.get("fixed_values") or {}
+    preprocess_raw = markdown_raw.get("preprocess") or {}
+    ai_raw = markdown_raw.get("ai") or {}
+    image_ai_raw = ai_raw.get("image_understanding") or {}
+    node_raw = ai_raw.get("nodes") or {}
+    if not isinstance(node_raw, dict):
+        raise ConfigError("markdown_to_yaml.ai.nodes 必须是 mapping")
+
+    fixed_values_cfg = MarkdownFixedValuesConfig(
+        namespace=fixed_raw.get("namespace"),
+        version=fixed_raw.get("version"),
+        language=str(fixed_raw.get("language", "cpp")),
+    )
+    preprocess_cfg = MarkdownPreprocessConfig(
+        image_base_url=str(preprocess_raw.get("image_base_url", "https://www.hiascend.com/")),
+        remove_footer=bool(preprocess_raw.get("remove_footer", True)),
+        remove_links=bool(preprocess_raw.get("remove_links", True)),
+        remove_images=bool(preprocess_raw.get("remove_images", True)),
+        remove_code_blocks=bool(preprocess_raw.get("remove_code_blocks", True)),
+        remove_tables=bool(preprocess_raw.get("remove_tables", True)),
+        remove_invalid_values=tuple(
+            str(value)
+            for value in preprocess_raw.get(
+                "remove_invalid_values",
+                ["[object Object]", "undefined"],
+            )
+        ),
+    )
+    node_cfg = {
+        str(path): MarkdownAiNodeConfig(
+            enabled=bool(value.get("enabled", False)),
+            mode=value.get("mode", "slot"),
+            max_chars=(int(value["max_chars"]) if value.get("max_chars") is not None else None),
+            require_evidence=bool(value.get("require_evidence", False)),
+            allow_generate=bool(value.get("allow_generate", False)),
+            allowed_values=tuple(str(item) for item in value.get("allowed_values", [])),
+        )
+        for path, value in node_raw.items()
+        if isinstance(value, dict)
+    }
+    ai_cfg = MarkdownAiConfig(
+        enabled=bool(ai_raw.get("enabled", True)),
+        single_pass=bool(ai_raw.get("single_pass", True)),
+        prompt_file=str(
+            ai_raw.get(
+                "prompt_file",
+                "src/script/prompts/markdown_to_yaml_v21.md",
+            )
+        ),
+        max_input_chars=int(ai_raw.get("max_input_chars", 120_000)),
+        image_understanding=MarkdownImageAiConfig(
+            enabled=bool(image_ai_raw.get("enabled", False)),
+            prompt_file=str(
+                image_ai_raw.get(
+                    "prompt_file",
+                    "src/script/prompts/image_resource_understanding.md",
+                )
+            ),
+            max_images_per_call=int(image_ai_raw.get("max_images_per_call", 8)),
+            max_description_chars=int(image_ai_raw.get("max_description_chars", 120)),
+        ),
+        nodes=node_cfg,
+    )
+    markdown_to_yaml_cfg = MarkdownToYamlConfig(
+        fixed_values=fixed_values_cfg,
+        preprocess=preprocess_cfg,
+        ai=ai_cfg,
+    )
+
     return Config(
         embedder=embedder_cfg,
         zvec=zvec_cfg,
         api_name=apiname_cfg,
+        markdown_to_yaml=markdown_to_yaml_cfg,
     )
 
 
@@ -269,6 +419,7 @@ def reset_config() -> None:
 # ---------------------------------------------------------------------------
 # 敏感字段读取（专供 Embedder 使用）
 # ---------------------------------------------------------------------------
+
 
 def get_dashscope_api_key() -> str:
     """从环境变量读 DashScope API key。

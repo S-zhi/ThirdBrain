@@ -184,7 +184,7 @@ def _detect_schema_version(payload: Mapping[str, Any]) -> str:
     else:
         raw = payload.get("raw")
         version = str(raw.get("schema_version")) if isinstance(raw, Mapping) else ""
-    if version not in {"1.0", "2.0"}:
+    if version not in {"1.0", "2.0", "2.1"}:
         raise YamlDocumentError(
             "UNSUPPORTED_SCHEMA_VERSION",
             f"不支持的 YAML Schema 版本: {version or 'missing'}",
@@ -323,6 +323,223 @@ def _validate_schema_v2(payload: Mapping[str, Any]) -> None:
     _validate_string_list(validation["warnings"], "validation.warnings")
 
 
+def _validate_ai_value(value: Any, path: str, *, max_chars: int | None = None) -> None:
+    """校验 Schema 2.1 的 ``value/is_ai`` 包装字段。"""
+    wrapped = _require_exact_fields(value, {"value", "is_ai"}, path)
+    if wrapped["value"] is not None:
+        _require_string(wrapped["value"], f"{path}.value")
+    if not isinstance(wrapped["is_ai"], bool):
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            f"{path}.is_ai 必须是 bool",
+        )
+    if (
+        max_chars is not None
+        and isinstance(wrapped["value"], str)
+        and len(wrapped["value"]) > max_chars
+    ):
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            f"{path}.value 不能超过 {max_chars} 字",
+        )
+
+
+def _validate_named_ai_items(value: Any, path: str) -> None:
+    """校验 Schema 2.1 参数或数据结构字段列表。"""
+    if not isinstance(value, list):
+        raise YamlDocumentError("SCHEMA_VALIDATION_ERROR", f"{path} 必须是列表")
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        mapping = _require_exact_fields(
+            item,
+            {"name", "type", "description", "is_ai"},
+            item_path,
+        )
+        for field in ("name", "type", "description"):
+            _require_string(mapping[field], f"{item_path}.{field}")
+        if not isinstance(mapping["is_ai"], bool):
+            raise YamlDocumentError(
+                "SCHEMA_VALIDATION_ERROR",
+                f"{item_path}.is_ai 必须是 bool",
+            )
+
+
+def _validate_schema_v21(payload: Mapping[str, Any]) -> None:
+    """校验最小化 Schema 2.1 文档包。"""
+    root = _require_exact_fields(
+        payload,
+        {"schema_version", "uuid", "source", "documents"},
+        "root",
+    )
+    if str(root["schema_version"]) != "2.1" or root["uuid"] is not None:
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            "schema_version 必须是 2.1，uuid 当前必须是 null",
+        )
+    source = _require_exact_fields(
+        root["source"],
+        {
+            "source_path",
+            "source_url",
+            "content_hash",
+            "source_markdown",
+            "preprocess_markdown",
+            "resources",
+        },
+        "source",
+    )
+    if bool(source["source_path"]) == bool(source["source_url"]):
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            "source_path 和 source_url 必须且只能填写一个",
+        )
+    _require_string(source["content_hash"], "source.content_hash", allow_empty=False)
+    if not source["content_hash"].startswith("sha256:"):
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            "source.content_hash 必须是 sha256 摘要",
+        )
+    _require_string(source["source_markdown"], "source.source_markdown")
+    _require_string(source["preprocess_markdown"], "source.preprocess_markdown")
+    resources = source["resources"]
+    if not isinstance(resources, list):
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            "source.resources 必须是列表",
+        )
+    resource_ids: set[str] = set()
+    for index, value in enumerate(resources):
+        path = f"source.resources[{index}]"
+        resource = _require_exact_fields(value, {"resource_id", "kind", "raw"}, path)
+        _require_string(resource["resource_id"], f"{path}.resource_id", allow_empty=False)
+        if resource["resource_id"] in resource_ids:
+            raise YamlDocumentError(
+                "SCHEMA_VALIDATION_ERROR",
+                f"{path}.resource_id 必须唯一",
+            )
+        resource_ids.add(resource["resource_id"])
+        if resource["kind"] == "image":
+            raw = _require_exact_fields(
+                resource["raw"],
+                {"resolved_uri", "alt", "title"},
+                f"{path}.raw",
+            )
+            _validate_ai_value(raw["alt"], f"{path}.raw.alt")
+        elif resource["kind"] == "link":
+            raw = _require_exact_fields(
+                resource["raw"],
+                {"resolved_uri", "anchor_text", "title", "criticality"},
+                f"{path}.raw",
+            )
+            _validate_ai_value(raw["anchor_text"], f"{path}.raw.anchor_text")
+            if raw["criticality"] not in {"low", "medium", "high"}:
+                raise YamlDocumentError(
+                    "SCHEMA_VALIDATION_ERROR",
+                    f"{path}.raw.criticality 非法",
+                )
+        else:
+            raise YamlDocumentError(
+                "SCHEMA_VALIDATION_ERROR",
+                f"{path}.kind 只能是 image 或 link",
+            )
+        if raw["resolved_uri"] is not None:
+            _require_string(raw["resolved_uri"], f"{path}.raw.resolved_uri")
+        _validate_ai_value(raw["title"], f"{path}.raw.title")
+
+    documents = root["documents"]
+    if not isinstance(documents, list) or not documents:
+        raise YamlDocumentError(
+            "SCHEMA_VALIDATION_ERROR",
+            "documents 必须是非空列表",
+        )
+    for index, value in enumerate(documents):
+        path = f"documents[{index}]"
+        document = _require_exact_fields(
+            value,
+            {"name", "namespace", "version", "language", "use"},
+            path,
+        )
+        for field in ("name", "namespace", "version", "language"):
+            _require_string(document[field], f"{path}.{field}", allow_empty=False)
+        use = _require_exact_fields(
+            document["use"],
+            {
+                "summary",
+                "category",
+                "description",
+                "product_support",
+                "prerequisites",
+                "function_details",
+                "data_structure",
+                "examples",
+            },
+            f"{path}.use",
+        )
+        _validate_ai_value(use["summary"], f"{path}.use.summary")
+        _validate_ai_value(use["category"], f"{path}.use.category")
+        if use["category"]["value"] not in {"function", "data_structure"}:
+            raise YamlDocumentError(
+                "SCHEMA_VALIDATION_ERROR",
+                f"{path}.use.category.value 非法",
+            )
+        _validate_ai_value(use["description"], f"{path}.use.description", max_chars=300)
+        if not isinstance(use["product_support"], list):
+            raise YamlDocumentError(
+                "SCHEMA_VALIDATION_ERROR",
+                f"{path}.use.product_support 必须是列表",
+            )
+        for item_index, item in enumerate(use["product_support"]):
+            item_path = f"{path}.use.product_support[{item_index}]"
+            support = _require_exact_fields(
+                item,
+                {"product", "supported", "is_ai"},
+                item_path,
+            )
+            _require_string(support["product"], f"{item_path}.product")
+            if not isinstance(support["supported"], bool) or not isinstance(
+                support["is_ai"], bool
+            ):
+                raise YamlDocumentError(
+                    "SCHEMA_VALIDATION_ERROR",
+                    f"{item_path}.supported/is_ai 必须是 bool",
+                )
+        for field in ("prerequisites", "examples"):
+            values = use[field]
+            if not isinstance(values, list):
+                raise YamlDocumentError(
+                    "SCHEMA_VALIDATION_ERROR",
+                    f"{path}.use.{field} 必须是列表",
+                )
+            for item_index, item in enumerate(values):
+                _validate_ai_value(item, f"{path}.use.{field}[{item_index}]")
+        function_details = _require_exact_fields(
+            use["function_details"],
+            {"input_parameters", "output_parameters", "signature"},
+            f"{path}.use.function_details",
+        )
+        _validate_ai_value(
+            function_details["signature"],
+            f"{path}.use.function_details.signature",
+        )
+        _validate_named_ai_items(
+            function_details["input_parameters"],
+            f"{path}.use.function_details.input_parameters",
+        )
+        _validate_named_ai_items(
+            function_details["output_parameters"],
+            f"{path}.use.function_details.output_parameters",
+        )
+        data_structure = _require_exact_fields(
+            use["data_structure"],
+            {"fields"},
+            f"{path}.use.data_structure",
+        )
+        _validate_named_ai_items(
+            data_structure["fields"],
+            f"{path}.use.data_structure.fields",
+        )
+
+
 def _validate_bson_payload(payload: Mapping[str, Any]) -> None:
     """预编码 BSON 并阻止不可写或超过 16 MiB 的文档进入 DAO。"""
     try:
@@ -382,7 +599,9 @@ def read_yaml_document(path: Path, *, max_file_bytes: int) -> ParsedYamlDocument
     version = _detect_schema_version(payload)
     if version == "1.0":
         _validate_schema_v1(payload)
-    else:
+    elif version == "2.0":
         _validate_schema_v2(payload)
+    else:
+        _validate_schema_v21(payload)
     _validate_bson_payload(payload)
     return ParsedYamlDocument(payload=payload, schema_version=version)

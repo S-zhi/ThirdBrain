@@ -18,7 +18,7 @@ description: |
 | **trigger phrases** | `筛选最小单元`、`过滤掉目录类文档`、`找出 API 文档`、`filter minimal units`、`scan and pick API docs`、`我要进知识库的 md` |
 | **not for** | 在线 URL 抓取（用 `web_fetch`）、PDF/Word 抽取（用 `pdf`/`docx` skill）、结构化抽取（用 `api-doc-extractor` skill）、全量无差别爬取（用 `api-doc-crawler` skill） |
 | **scope** | project（适用任何含 Markdown 文档树的目录，但内置规则针对 AscendC API 风格） |
-| **position in pipeline** | 第 1 步（在 `api-doc-crawler` / `api-doc-extractor` 之前） |
+| **position in pipeline** | 数据处理层第 1 步（在数据采集层 `api-doc-crawler` 之后、`api-doc-extractor` 之前） |
 
 </details>
 
@@ -145,7 +145,7 @@ for p in sorted(src.rglob('*')):
 | `<--out>` 指定的 text 文件 | ✓ | 一行一条绝对路径，UTF-8，无 BOM，行尾 `\n` |
 | `<--out>.excluded.txt` | ✓ | 被剔除文件清单，每行 `<abs_path>\t<reason>` |
 
-下游管线（`api-doc-crawler` / `api-doc-extractor`）用 `<--out>` 文本做 input list 即可。
+下游 Markdown → YAML 提取脚本或 `api-doc-extractor` 用 `<--out>` 文本做 input list 即可。
 
 ---
 
@@ -240,16 +240,22 @@ PowerShell 里 `&&` 是 `;`（不短路）或 `&&`（PS7+），旧版 PS5.1 只�
 ## 11. 与本仓库其他 skill 的衔接
 
 ```
+[数据采集层 · api-doc-crawler]
+        │  更新 API参考/**/*.md + state + manifest
+        ▼
 [md-minimal-unit-filter]   ←   你在这里
         │  产出 minimal-units.txt
         ▼
-[api-doc-crawler]          →  YAML 上下文包
-        │
+[Markdown → YAML 提取脚本]
+        │  产出 ingest/output/yaml/<doc>.yaml
         ▼
-[api-doc-extractor]        →  16 字段结构化 YAML
+[api-doc-extractor]        →  16 字段结构化契约
         │
         ▼
 [ingest → vector store]
 ```
 
-这个 skill 处于流水线**最前端**，作用是**节流**——把 2249 篇文档里的 64 篇非最小单元（TOC / 概览 / 简介 / 纯 nav 失败品）先砍掉，避免下游浪费 token 抽它们。
+这个 skill 处于**数据处理层的第一步**，作用是**节流**——把 2249 篇文档里的 64 篇
+非最小单元（TOC / 概览 / 简介 / 纯 nav 失败品）先砍掉，避免下游浪费 token 抽它们。
+数据采集层的数据爬取、正文解析和目录层级规则见
+[`docs/data-collection-layer-crawler.md`](../../../docs/data-collection-layer-crawler.md)。

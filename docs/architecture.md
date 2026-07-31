@@ -12,7 +12,8 @@ Zvec 是 in-process 向量库（不是独立服务），不引入网络/部署�
 
 ```mermaid
 flowchart LR
-    A["原始 Markdown<br/>API参考/**/*.md"] --> B["api-doc-extractor<br/>固定规则解析与分类"]
+    S["数据采集层<br/>api-doc-crawler<br/>Markdown + state + manifest"] --> A["来源 Markdown<br/>API参考/**/*.md"]
+    A --> B["api-doc-extractor<br/>固定规则解析与分类"]
     B --> C["ORM<br/>唯一真源与全过程留痕"]
     C --> D["MiniMax<br/>三个语义字段回填"]
     D --> E["双层校验闸门"]
@@ -49,6 +50,17 @@ flowchart LR
 | ORM | 事实与状态存储 | 承载提取、校验、审计、LLM 回填和索引全过程 |
 | 网关 | 统一入口 | 负责鉴权、限流、路由和访问日志 |
 | MCP | Agent 接口 | 将检索与 Context Package 封装为代码 Agent 可调用工具 |
+
+### 2.3 数据采集层与数据处理层的边界
+
+`API参考/**/*.md` 不是官网页面的直接镜像，而是数据采集层的数据爬取模块产出的、可追踪
+的来源副本。`api-doc-crawler` 通过 YAML 配置和 `AdapterFactory` 完成页面发现、浏览器/HTTP
+抓取、正文与目录层级解析、规范 Markdown、SHA-256 Diff、原子写入、JSON state 和
+manifest；它不生成 API 契约 YAML，不调用 LLM，也不写 ORM/Zvec。
+
+数据处理层从采集层交付的 Markdown 开始，执行最小单元筛选、结构化抽取、校验和索引。
+这样可以把“官网内容是否变化”与“API 语义抽取是否成功”分开审计。采集层的完整流程、
+解析规则、层级路径和恢复方式见 [`data-collection-layer-crawler.md`](./data-collection-layer-crawler.md)。
 
 ## 3. 数据提取层
 

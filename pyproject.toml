@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
+    "beautifulsoup4>=4.12",
     "dashscope>=1.26.4",
     "fastapi>=0.115",
+    "httpx>=0.28",
     "load-dotenv>=0.1.0",
+    "markdownify>=1.0",
     "openai>=2.49.0",
     "path>=17.1.1",
+    "playwright>=1.61.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2,<3",
     "pymongo>=4.14,<5",
@@ -24,7 +28,12 @@ dependencies = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=1",
+    "ruff>=0.16",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
 
 [tool.pytest.ini_options]
 # 默认只跑 unit；integration / benchmark 需要各自显式指定

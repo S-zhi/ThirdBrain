@@ -60,3 +60,4 @@ data/
 
 /yaml/
 /benchmark/generate/generate_isok_data/md/
+/benchmark/generate/generate_isok_data_by_llm/

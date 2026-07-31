@@ -1,207 +1,225 @@
 ---
 name: api-doc-crawler
 description: |
-  Pipeline 第 2 步（接 `md-minimal-unit-filter` 的清单）：递归爬取指定目录下所有 AI API 文档（Markdown / HTML / 纯文本），抽取标题、章节、参数表、代码示例、版本与命名空间（org.product.namespace.version）等元数据，输出结构化 YAML/JSON 上下文包喂给下游 `api-doc-extractor`。强契约：必须 100% 覆盖输入清单的所有文档，未覆盖的进 uncovered.md 一一点名。
-  Use when the user says: "爬 API 文档"、"把 AI 文档拉下来"、"同步文档目录"、"导出 API 文档"、"刷新语料"、"crawl api docs"、"按清单抽元数据"。
-  Do NOT use for: 在线 URL 抓取（用 web_fetch）、二进制 PDF/Word 抽取（用 pdf/docx skill）、单文档片段阅读（用 read 工具）、先筛掉非最小单元（用 md-minimal-unit-filter）、结构化契约抽取（用 api-doc-extractor）。
+  在数据采集层从配置的官方文档源定时发现、抓取、解析并增量同步 Markdown。使用
+  SourceAdapter Factory 支持多来源，通过规范正文 SHA-256 判定 added/updated/unchanged，
+  保留官网目录层级并生成通用
+  manifest.json。Use when the user says: "爬 API 文档"、"同步文档目录"、
+  "刷新语料"、"定时更新官网文档"、"crawl api docs"。
+  Do NOT use for: 结构化 API 契约抽取、向量写入、LLM 回填、PDF/Word 抽取。
 ---
 
-> **预览说明**：上方 `---` 之间是 YAML frontmatter，所有 markdown 预览器（VSCode / GitHub / Obsidian）都会把它当元数据**隐藏渲染**——这是设计行为，Claude / Cursor / Copilot 等 AI 工具通过读它来决定是否触发本 skill。下方 `<details>` 块把同一份元数据用人类可读的方式再展示一次，方便你在编辑器里直接看到。
+# API 文档定时同步
 
-<details>
-<summary><strong>📌 Skill 元数据（预览用，与上方 frontmatter 同源）</strong></summary>
+本 Skill 对应数据采集层的数据爬取模块，是后续数据处理 Pipeline 的输入阶段。它维护
+可追踪的来源 Markdown、目录层级和同步 manifest，不生成结构化 YAML，不调用 LLM，也不
+写 MongoDB/Zvec。完整中文设计、解析流程和边界见 [`docs/data-collection-layer-crawler.md`](../../../docs/data-collection-layer-crawler.md)。
 
-| 字段 | 值 |
-|---|---|
-| **name** | `api-doc-crawler` |
-| **description** | Pipeline 第 2 步（接 `md-minimal-unit-filter` 的清单）：递归爬取指定目录下所有 AI API 文档（Markdown / HTML / 纯文本），抽取标题、章节、参数表、代码示例、版本与命名空间（`org.product.namespace.version`）等元数据，输出结构化 YAML/JSON 上下文包喂给下游 `api-doc-extractor`。强契约：必须 100% 覆盖输入清单的所有文档，未覆盖的进 `uncovered.md` 一一点名。 |
-| **trigger phrases** | `爬 API 文档`、`把 AI 文档拉下来`、`同步文档目录`、`导出 API 文档`、`刷新语料`、`crawl api docs`、`按清单抽元数据` |
-| **not for** | 在线 URL 抓取（用 `web_fetch`）、二进制 PDF/Word 抽取（用 `pdf`/`docx` skill）、单文档片段阅读（用 `read` 工具）、先筛掉非最小单元（用 `md-minimal-unit-filter`）、结构化契约抽取（用 `api-doc-extractor`） |
-| **scope** | project（仅本仓库 `API参考/` 适用） |
-| **position in pipeline** | 第 2 步（接 md-minimal-unit-filter，喂 api-doc-extractor） |
+## 输入、输出和边界
 
-</details>
+```text
+YAML source 配置
+  → AdapterFactory
+  → 发现/抓取/解析/层级规范化
+  → SHA-256 Diff 和原子应用
+  → API参考/**/*.md + state + manifest
+  → 下游 md-minimal-unit-filter / 结构化提取
+```
 
-<br>
+采集模块不负责把 Markdown 抽成 API 参数、示例或约束契约；这些内容由后续数据处理层
+完成。采集模块必须保证页面正文、来源身份、目录路径和 Hash 可复现。
 
-# API 文档爬取（api-doc-crawler）
+## 实现入口
 
-把一个目录下的 AI API 文档全部、可验证、幂等地转成结构化上下文包。**完整性是硬契约**：目标目录里能被白名单命中的文档，一个都不能少——漏掉的会在收尾报告 `uncovered.md` 里逐个点名，CI 退出码非 0。
+- CLI：`python -m src.script.sync_docs`
+- 配置：`configs/document_sync.yaml`
+- 核心：`src/doc_sync/`
+- 初始化文档：`docs/document-sync-setup.md`
 
----
+## 设计契约
 
-## Inputs to collect
+1. 来源实现必须继承 `SourceAdapter` 或 `HttpDocumentSourceAdapter`。
+2. Adapter 通过 `AdapterFactory.register()` 显式注册，禁止 YAML 动态导入类。
+3. 核心状态、Hash、Diff、写入和 manifest 不包含具体产品字段。
+4. 来源专属字段只能进入 `metadata`。
+5. 文档身份是 `(source_id, document_id)`，不是文件路径。
+6. 是否更新只由规范正文 SHA-256 决定。
+7. 内容不变时不得写文件，也不得改变 mtime。
+8. 所有候选先进入 staging，正式写入使用同目录临时文件加 `os.replace()`。
+9. 单页失败不得覆盖旧文件。
+10. 只有明确 404/410 才累计缺失；候选归档也不自动删除文件。
 
-调用前先确认/读取：
+## 文档解析和目录层级
 
-- `--src <dir>`：要爬的根目录。本仓库默认是 `API参考/`（含 2249 个 markdown）。
-- `--out <dir>`：输出目录，默认 `ingest/output/yaml/`。
-- `--ext <.md,.markdown,.html,.htm,.txt>`：白名单扩展名，默认 `.md,.markdown`。
-- `--incremental`：增量模式（基于 mtime + sha1 跳过未变文件）。
-- `--concurrency <N>`：并发 worker 数，默认 `min(8, cpu_count)`。
-- `--rate-limit <req/sec>`：URL 拉取限速，默认 `5`。
-- `--retry <N>`：单文档失败重试次数，默认 `2`。
-- `--exclude <glob>`：额外排除规则，可重复。
-- `--skip`：跳过所有交互确认（CI 批处理用），**不影响**任何错误中断。
-- `--dry-run`：只盘点不写文件，先看报告再决定。
+Adapter 的解析必须区分“来源正文”和“最终文件包装”：
 
-> 用户没给 `--src` 时，默认走本仓库的 `API参考/`；不要去爬用户机器上的其他目录。
+- `article_body` 选择器定位正文，标题从配置的 title selectors 提取。
+- 清理脚本、样式、无关导航和重复页脚，规范 Unicode、换行、空白和代码块。
+- `normalized_content` 用于 SHA-256；`artifact_content` 用于写入 Markdown。
+- 文档身份使用稳定 `(source_id, document_id)`，不使用路径作为身份。
+- 新页面路径优先复用同一身份的旧路径，其次从页面 title 和父级链接恢复层级，最后才进入 `_待归类`。
 
----
+官网的 child-to-parent 导航必须转换为 parent-to-child。例如：
 
-## Procedure
+```text
+SIMD API → C API → Memory 矢量计算 → Exp
+```
 
-按以下顺序执行；任一步失败按"Failure handling"处理，不静默继续。
+应生成 `API参考/SIMD_API/C_API/Memory矢量计算/Exp.md`，不能把全部页面平铺在
+`API参考/`。当前 Hiascend Adapter 支持浏览器渲染；`browser.rendered_html_directory`
+只用于排障，渲染缓存不是最终输出。
 
-1. **解析参数 + 工具自检**：先把 `--src` 等参数记下来；再 `command -v python3 rg find` 三件套检查（缺一个就 fail，不要尝试装）。
+公共 HTTP 能力的适用范围：默认 `HttpDocumentSourceAdapter.fetch()` 使用共享
+`HttpFetchClient`；当前 Hiascend 为支持 JavaScript 渲染而覆盖浏览器 `fetch`，其 robots、
+QPS、429/5xx 重试和响应大小策略需要单独补齐和验收，不能仅根据继承关系假定已经生效。
 
-2. **盘点源目录（这步决定"全部"的定义）**：
-   - 递归扫 `--src`，按 `--ext` 白名单过滤；
-   - 套 `--exclude`（默认排除 `_*`、`node_modules`、`.git`、`.venv`）；
-   - 统计 `total_candidates / by_ext / by_dir`，并跟上一轮 `manifest.json` 对账（增量模式标记 `new / modified / unchanged / deleted`）；
-   - 终端输出一行：`<目录> 共 N 个候选，其中 M 个需处理（Δ 新增、≠ 修改）`。
-   - **N 之后的任何不一致都要在 uncovered 报告里解释**——这是契约的"锚"。
+## 初始化
 
-3. **爬取与抽取**（并发 `--concurrency`）：
-   ```
-   read → detect_encoding → normalize_text → extract_metadata → extract_sections → extract_code → write_yaml
-   ```
-   每篇文档至少产出以下字段（缺值用字符串 `_unknown_`，**不要**用 `null`）：
-   ```yaml
-   doc_id: <sha1(src_relpath)[:16]>
-   source_path: <相对 --src 的路径>
-   namespace: <com.huawei.cann.ascendc.op.{version} 或 _unknown_>
-   sub_namespace: <normalize|linalg|conv|... 或 _unknown_>
-   version: <v8|... 或 _unknown_>
-   title: <H1>
-   sections: [<section_name>, ...]
-   code_blocks: N
-   hash: <sha256(content)>
-   mtime: <ISO 8601>
-   scraped_at: <ISO 8601>
-   ```
-   章节按以下映射抽取（不严格匹配时按 H2/H3 切分保留在 `sections[]`，**不要静默丢字段**）：
-   | 章节关键词 | 字段 |
-   |---|---|
-   | `产品支持情况` | `product_support` |
-   | `功能说明` | `description` |
-   | `函数原型` | `signatures` |
-   | `参数说明` | `params`（结构化 `{name, type, desc}[]`） |
-   | `返回值说明` | `returns` |
-   | `约束说明` | `constraints` |
-   | `调用示例` | `examples` |
-   | `需要包含的头文件` | `headers` |
-   | `注意事项` | `notes` |
+先读取并检查配置：
 
-4. **URL 拉取（如 `--src` 是 URL 列表）**：
-   - 限速 `--rate-limit`，超时 30s，重试 `--retry` 次；
-   - `Content-Type` 不在 `text/markdown | text/html | text/plain | application/xhtml+xml` 内的跳过并记录；
-   - 失败 URL 落 `dead-letter/urls.txt`。
+```bash
+uv run python -c "
+from src.doc_sync.config import load_document_sync_config
+from src.doc_sync.adapters import AdapterFactory
+config = load_document_sync_config('configs/document_sync.yaml')
+AdapterFactory.validate_sources(config.sources)
+print(AdapterFactory.available_types())
+"
+```
 
-5. **写文件**：`tmp + rename` 原子写（避免并发 worker 读到半截）。
+小范围 dry-run：
 
-6. **校验完整性（**这是 skill 的灵魂**）**：
-   ```
-   covered    = len(yaml_files_written) + len(dead_letter_files)
-   uncovered  = total_candidates - covered - len(explicitly_excluded)
-   assert uncovered == 0   # 否则写 uncovered.md 并 exit 1
-   ```
-   - 通过：写 `manifest.json`（含 `total / by_ext / by_dir / new / modified / unchanged / deleted / failed / duration_sec`）+ `summary.md`（人读小结）。
-   - 不通过：写 `uncovered.md` 逐行列出 `expected_path → reason`，**退出码非 0**。
-   - **禁止**"补空 yaml 凑数"——那比漏报更糟糕，下游会把它当真文档。
+```bash
+uv run python -m src.script.sync_docs bootstrap --dry-run --limit 10
+```
 
-7. **收尾**（增量模式同时输出 `state.db`，记录 sha1 + mtime）：
-   - 终端打印：`爬取完成：覆盖 N/M（100%），新增 Δ，修改 ≠，失败 F（已落 dead-letter），耗时 T。`
+全量 dry-run：
 
----
+```bash
+uv run python -m src.script.sync_docs bootstrap --dry-run
+```
 
-## Output contract
+人工检查 manifest 后建立状态：
 
-每次执行产出（路径相对于 `--out`）：
+```bash
+uv run python -m src.script.sync_docs bootstrap --apply
+```
 
-| 文件 | 必有 | 说明 |
+## 日常同步
+
+```bash
+uv run python -m src.script.sync_docs sync --apply --trigger scheduled
+```
+
+推荐服务器 Cron：
+
+```cron
+CRON_TZ=Asia/Shanghai
+0 3 * * * cd /opt/ragWithColdApiDocument && uv run python -m src.script.sync_docs sync --apply --trigger scheduled
+```
+
+不传 `--apply` 时默认只生成 staging 和 manifest，不修改 Markdown 或 state。
+
+## Hash 与状态
+
+同步过程使用 SHA-256：
+
+- `response_hash`：原始 HTTP 响应，只用于排障。
+- `content_hash`：Adapter 输出的规范正文，是更新判定依据。
+- `file_hash`：最终 Markdown 字节，用于识别本地修改。
+
+通用操作：
+
+| 操作 | 条件 | 行为 |
 |---|---|---|
-| `<relative_path>.yaml` | ✓ | 每篇文档的结构化包 |
-| `manifest.json` | ✓ | 本次爬取清单（统计 + 增量 delta） |
-| `summary.md` | ✓ | 人读小结（覆盖数、失败数、平均大小、Top5 慢/快） |
-| `dead-letter/` | △ | 失败样本（文件 + URL 分目录） |
-| `uncovered.md` | **不漏则无** | 出现 = 事故，CI 挂红 |
-| `state.db` | 增量模式 | sha1 + mtime 缓存，下一轮直接复用 |
+| `added` | 新稳定身份 | 创建 Markdown |
+| `unchanged` | 来源和本地均未变化 | 不写文件 |
+| `updated` | 来源正文 Hash 变化 | 原子覆盖 |
+| `restored` | 来源未变、本地被修改 | 按策略恢复来源 |
+| `moved` | 身份不变、URI 变化 | 更新来源 URI |
+| `failed` | 抓取或解析失败 | 保留旧文件 |
+| `missing` | 明确 404/410 | 累计缺失次数 |
+| `archived_candidate` | 达到缺失阈值 | 保留文件，只标候选 |
 
-下游 skill（`ingest-normalizer` 等）默认从 `ingest/output/yaml/` 读，**不要**让下游重新爬。
+持久状态为：
 
----
+```text
+data/doc_sync/state/<source_id>.json
+```
+
+禁止重新引入 mtime + SHA-1 或 `state.db` 作为更新依据。
+
+## 输出契约
+
+```text
+data/doc_sync/
+├── state/<source_id>.json
+├── runs/<run_id>/manifest.json
+├── staging/<run_id>/
+├── backups/<run_id>/
+├── journals/<run_id>.json
+├── latest.json
+└── sync.lock
+```
+
+`manifest.json` 至少包含：
+
+- `run_id/mode/trigger/status`
+- `stats`
+- `updated_markdown`
+- `source_results`
+- `documents`
+- `errors`
+
+服务端消费 `updated_markdown` 即可获得本轮实际落盘的 Markdown 列表。来源专属字段
+只能出现在 `documents[].metadata`。
+
+查看本轮真实变化：
+
+```bash
+jq '.updated_markdown' data/doc_sync/latest.json
+jq '.documents[] | select(.operation != "unchanged") |
+  {operation, relative_path, old_content_hash, new_content_hash, reason}' \
+  data/doc_sync/latest.json
+```
+
+`updated_markdown` 为空表示本轮没有实际写入；失败、404 和 dry-run 候选仍需查看
+`documents` 与 `errors`。
 
 ## Failure handling
 
 | 错误 | 处理 |
 |---|---|
-| 缺工具（python3/rg/find） | fail fast，提示装哪一个，**不要**自动装 |
-| 文件读不了（权限/编码） | 进 `dead-letter/<relpath>.err` + 继续 |
-| 解析异常 | 标记 `parse_status: failed` + 进 dead-letter |
-| URL 拉取失败 | 重试 `--retry` 次仍败 → `dead-letter/urls.txt` |
-| 完整性不达标 | `uncovered.md` + `exit 1`（CI 必挂红） |
-| 单文件失败 | **不影响**其他文件，整体不中断 |
-| `--skip` 模式下任何错 | **仍然 fail**，跳过的是交互确认不是错误 |
+| YAML 无效或未知字段 | 写文件前 fail fast |
+| 未知 Adapter | 报错并列出可用类型 |
+| URL 越过 allowlist | 拒绝请求 |
+| 429/5xx/网络错误 | 有限重试，最终标记单页 failed |
+| 正文选择器失效 | 保留旧文件并在 manifest 报错 |
+| 浏览器启动/关闭或单页渲染超时 | 当前页 failed，保留旧文件；检查浏览器依赖、复用策略和容量 |
+| 单页 404/410 | 增加 missing_count，不删除 |
+| 路径逃逸 | 拒绝候选 |
+| 目标路径碰撞 | 按配置追加 document_id 或失败 |
+| 文件锁冲突 | CLI 退出码 3 |
+| 应用阶段中断 | 使用 journal resume |
 
-空文档也要落 yaml（占位 `parse_status: empty`），不要静默跳过——下游要做"已处理"对账。
+恢复命令：
 
----
-
-## Examples
-
-**Input 1**：用户说"爬一下 API参考/ 下的所有文档"
-
-执行（macOS / Linux）：
 ```bash
-python3 ingest/scripts/extract_docs.py \
-  --src API参考/ \
-  --out ingest/output/yaml/ \
-  --ext .md,.markdown \
-  --incremental
+uv run python -m src.script.sync_docs resume --run-id <run_id>
 ```
 
-执行（Windows PowerShell）：
-```powershell
-python ingest/scripts/extract_docs.py `
-  --src API参考/ `
-  --out ingest/output/yaml/ `
-  --ext .md,.markdown `
-  --incremental
-```
+## 新增来源
 
-**Output**：
-- `ingest/output/yaml/` 下生成 2249 个 yaml（或增量模式下 Δ 个新增 + ≠ 个修改）
-- `ingest/output/manifest.json` 写好
-- 终端：`爬取完成：覆盖 2249/2249（100%），新增 0，修改 0，失败 0，耗时 47s。`
+1. 定义 `extra="forbid"` 的 Adapter options。
+2. 继承 `SourceAdapter`；网站来源优先继承 `HttpDocumentSourceAdapter`。
+3. 实现抽象方法与 URL allowlist。
+4. 声明唯一 `adapter_type` 和 `config_model`。
+5. 在 `src/doc_sync/adapters/__init__.py` 显式注册。
+6. 在 `configs/document_sync.yaml` 增加 source。
+7. 运行 Adapter Contract 测试。
 
-**Input 2**：CI 漏抓一份文档（`API参考/SIMD_API/基础API/工具函数/Async.md`）
+核心同步服务禁止增加按具体 adapter type 分支。
 
-执行同上，结束后：
-- `ingest/output/uncovered.md` 出现一行：`API参考/SIMD_API/基础API/工具函数/Async.md → 文件不存在或被 exclude`
-- 进程退出码 1，CI 挂红，PR 不可合。
-
----
-
-## Windows (win32) platform notes
-
-本 skill 的核心脚本 `ingest/scripts/extract_docs.py` 是跨平台 Python 3，**macOS / Linux / Windows 都可执行**。本节只列需要在 PowerShell 下替换的命令片段：
-
-| macOS / Linux bash | Windows PowerShell 等价 |
-|---|---|
-| `command -v python3` | `Get-Command python`（Windows 通常叫 `python`） |
-| `rg --files API参考/` | `Get-ChildItem -Recurse -Include *.md API参考/ \| Select-Object -ExpandProperty FullName` |
-| `find API参考/ -name '*.md'` | `Get-ChildItem -Recurse -Filter *.md API参考/` |
-| `cat manifest.json \| jq .` | `Get-Content manifest.json \| ConvertFrom-Json` |
-| `cp -r src dst/` | `Copy-Item -Recurse src dst` |
-| `sha1sum file` | `Get-FileHash file -Algorithm SHA1` |
-| `/tmp/...` | `$env:TEMP\...`（用 `Join-Path $env:TEMP "..."`） |
-
-工具自检改为：
-```powershell
-foreach ($t in @('python','Get-ChildItem','Get-FileHash')) {
-  if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { throw "缺少: $t" }
-}
-```
-
-PowerShell 里 `&&` 是 `;`（不短路）或 `&&`（PS7+），旧版 PS5.1 只能 `;`，写脚本时显式用 `if ($LASTEXITCODE -eq 0) { ... }` 链式判断更稳。
+新增 Adapter 完成后先用 10 页 dry-run 审核 `relative_path`、正文 Hash 和错误，再做全量
+bootstrap。错误平铺副本应移动到 `data/doc_sync/quarantine/<run_id>/` 并生成
+`quarantine_manifest.json`，保持可恢复，不能无记录删除。
