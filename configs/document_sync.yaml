@@ -1,0 +1,99 @@
+schema_version: "1.0"
+
+# workspace_root 相对于本 YAML 文件所在目录解析。
+workspace_root: ..
+
+runtime:
+  root_directory: ./data/doc_sync
+  retention_days: 30
+  lock_timeout_seconds: 0
+
+http_defaults:
+  user_agent: rag-with-cold-api-doc-sync/0.1
+  concurrency: 4
+  requests_per_second: 2
+  timeout_seconds: 30
+  max_response_bytes: 10485760
+  respect_robots_txt: true
+
+  retry:
+    max_attempts: 4
+    initial_backoff_seconds: 1
+    max_backoff_seconds: 30
+    jitter_ratio: 0.2
+    retry_status_codes:
+      - 429
+      - 500
+      - 502
+      - 503
+      - 504
+
+policies:
+  missing_threshold: 3
+  overwrite_local_changes: true
+  apply_valid_changes_on_partial_run: true
+
+  redirects:
+    max_redirects: 3
+    allow_cross_host: false
+
+  large_change:
+    warning_ratio: 0.10
+    block_apply: false
+
+  path_collision:
+    strategy: append_document_id
+
+sources:
+  - id: hiascend-cann-910beta3
+    enabled: true
+    target_directory: ./API参考
+
+    adapter:
+      type: hiascend
+
+      options:
+        product: CANNCommunityEdition
+        version: "910beta3"
+        language: zh
+
+        root_urls:
+          - https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/atlasascendc_api_07_0003.html
+
+        allowed_hosts:
+          - www.hiascend.com
+
+        allowed_path_prefixes:
+          - /document/detail/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/
+
+        document_url_pattern: '(?:(?:atlasascendc_api|atlas_ascendc)_[0-9A-Za-z_]+\.html|[^/]+\.md)$'
+        max_pages: 3000
+
+        selectors:
+          article_body: .the-article-body
+          title:
+            - h1
+            - .topictitle1
+          parent_links:
+            - .familylinks a
+
+        # 强制使用真实 Chrome 执行 JavaScript，并保存完整渲染后 HTML。
+        browser:
+          channel: chrome
+          headless: true
+          wait_until: domcontentloaded
+          navigation_timeout_ms: 60000
+          selector_timeout_ms: 60000
+          retry_attempts: 2
+          retry_initial_backoff_seconds: 1
+          fallback_to_http: true
+          rendered_html_directory: ./data/doc_sync/rendered_html
+
+        existing_document:
+          source_url_pattern: '^>\s*来源:\s*(?P<value>https?://.+)$'
+          external_id_pattern: '^>\s*节点:\s*`?(?P<value>[^`]+)`?$'
+
+        output:
+          source_label: 来源
+          external_id_label: 节点
+          unresolved_directory: _待归类
