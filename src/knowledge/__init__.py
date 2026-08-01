@@ -1,0 +1,41 @@
+"""LLM 派生 Knowledge Wiki 的只读查询模块。"""
+
+from src.knowledge.contracts import (
+    ArtifactKind,
+    ArtifactStatus,
+    CacheMiss,
+    Confidence,
+    EnrichmentRequest,
+    EvidenceRef,
+    KnowledgeItem,
+    QueryBudget,
+    QueryKnowledgeOptions,
+    QueryKnowledgeResult,
+    QueryScope,
+    RankedKnowledgeItem,
+    ReaderSearchResult,
+    RelationRef,
+    RelationType,
+    RetrievalChannel,
+    RetrievalHit,
+)
+
+__all__ = [
+    "ArtifactKind",
+    "ArtifactStatus",
+    "CacheMiss",
+    "Confidence",
+    "EnrichmentRequest",
+    "EvidenceRef",
+    "KnowledgeItem",
+    "QueryBudget",
+    "QueryKnowledgeOptions",
+    "QueryKnowledgeResult",
+    "QueryScope",
+    "RankedKnowledgeItem",
+    "ReaderSearchResult",
+    "RelationRef",
+    "RelationType",
+    "RetrievalChannel",
+    "RetrievalHit",
+]

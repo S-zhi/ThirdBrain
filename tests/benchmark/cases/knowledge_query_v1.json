@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "id": "official-namespace-case-isolation",
+      "query": "Barrier",
+      "namespace": "AscendC.API.910beta3",
+      "version": "910beta3",
+      "expected_ids": ["AscendC.API.910beta3.Barrier"],
+      "forbidden_ids": ["ascendc.api.910beta3.Barrier"],
+      "prd_points": ["P1", "P2"]
+    },
+    {
+      "id": "source-hit-without-artifact",
+      "query": "数据同步",
+      "namespace": "AscendC.API.910beta3",
+      "version": "910beta3",
+      "expected_enrichment": ["AscendC.API.910beta3.Barrier"],
+      "prd_points": ["P3", "P4"]
+    },
+    {
+      "id": "micro-budget-provenance",
+      "query": "缓存一致性",
+      "namespace": "AscendC.API.910beta3",
+      "version": "910beta3",
+      "max_capsule_items": 3,
+      "require_provenance": true,
+      "prd_points": ["P3", "P5"]
+    }
+  ]
+}
