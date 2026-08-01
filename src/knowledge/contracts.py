@@ -53,6 +53,20 @@ class KnowledgeRepository(Protocol):
     ) -> tuple[ActiveArtifact, ...]:
         """读取 scope 内当前 active Artifact，供保守合并使用。"""
 
+    async def list_active_artifact_revisions(
+        self,
+        wiki_id: str | None = None,
+        namespace: str | None = None,
+        version: str | None = None,
+    ) -> tuple[ArtifactRevision, ...]:
+        """读取正式 Catalog 可达的完整 active Artifact Revision。
+
+        该端口专供可重建派生索引和一致性检查使用。参数全部为空表示扫描
+        所有 Wiki；传入任意 scope 字段时实现应按给定字段精确过滤。旧的
+        ``list_active_artifacts`` 只返回合并流程所需的轻量快照，不足以
+        重建索引，因此这里返回不可变的完整 Revision。
+        """
+
     async def stage(
         self,
         operation_id: str,

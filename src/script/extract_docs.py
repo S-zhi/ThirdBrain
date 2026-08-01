@@ -86,6 +86,54 @@ SIMD_NAMESPACE_PREFIX = "com.huawei.cann.ascendc.op"
 SIMD_CATEGORY_BY_DIRECTORY = {
     "工具函数": "function",
 }
+NAMESPACE_SEGMENT_BY_PATH = {
+    "SIMD_API": "simd_op",
+    "SIMT_API": "simt_op",
+    "AI_CPU_API": "aicpu_op",
+    "Utils_API": "utils",
+    "附录": "appendix",
+    "Ascend_C": "ascendc",
+}
+
+
+def _default_namespace_segment(segment: str) -> str:
+    """把路径段映射成 namespace 中段；找不到时做轻量规范化。
+
+    轻量规范化规则：转小写、把所有非字母数字字符替换为下划线、去除首尾下划线；
+    如果结果为空，则退讨为 ``"unknown"``，保证 namespace 永不为空字符串。
+    """
+    if segment in NAMESPACE_SEGMENT_BY_PATH:
+        return NAMESPACE_SEGMENT_BY_PATH[segment]
+    normalized = re.sub(r"[^a-z0-9_]+", "_", segment.lower()).strip("_")
+    return normalized or "unknown"
+
+
+def _default_namespace_from_path(
+    document_path: Path,
+    version: str | None,
+) -> str | None:
+    """从 ``API参考`` 之下的第一段路径推导默认 namespace。
+
+    目的：覆盖所有路径（包括 ``SIMT_API`` / ``AI_CPU_API`` / ``Utils_API`` /
+    ``附录`` / ``Ascend_C`` / 未在白名单的子目录），让 namespace 推导不再
+    因路径不包含 ``SIMD_API`` 而返回空值。Version 已知时把 version 拼成
+    namespace 的最后一段；Version 未知时仅返回产品段。
+    """
+    parts = list(document_path.parts)
+    try:
+        api_idx = parts.index("API参考")
+    except ValueError:
+        return None
+    if api_idx + 1 >= len(parts):
+        return None
+    product = parts[api_idx + 1]
+    segment = _default_namespace_segment(product)
+    base = f"com.huawei.cann.{segment}"
+    if version:
+        return f"{base}.{version}"
+    return base
+
+
 MINIMAX_QUOTA_PRINT_LOCK = Lock()
 TOP_LEVEL_FIELDS = (
     "schema_version",
@@ -1054,6 +1102,13 @@ def resolve_authoritative_hints(
         normalized_name = _normalized_api_name(hints["name"])
         if normalized_name:
             hints["chunk_id"] = f"{hints['namespace']}.{normalized_name}"
+
+    # 默认 namespace 退讨规则：所有路径都必须能推导出一个非空 namespace。
+    # 优先级低于 SIMD_API 特化逻辑，但覆盖所有其他路径。
+    if hints["namespace"] is None:
+        fallback = _default_namespace_from_path(document_path, hints.get("version"))
+        if fallback:
+            hints["namespace"] = fallback
     return hints
 
 

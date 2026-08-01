@@ -7,7 +7,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
-from src.knowledge.models import ArtifactStatus, ArtifactType, Confidence, RelationType
+from src.knowledge.models import (
+    ArtifactStatus,
+    ArtifactType,
+    Confidence,
+    RelationType,
+    SourceOrigin,
+)
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -49,10 +55,14 @@ class MatchConfidence(StrEnum):
 
 
 class QueryScope(QueryModel):
-    """Wiki、底层 Collection、官方 namespace 与版本的联合隔离范围。"""
+    """Wiki、官方 namespace 与版本的查询隔离范围。
+
+    ``rag_collection_ids`` 是兼容旧查询方的可选过滤器。空 tuple 表示查询整个
+    独立 LLM Wiki，不代表去读取任何底层 RAG collection。
+    """
 
     wiki_id: NonEmptyString
-    rag_collection_ids: tuple[NonEmptyString, ...] = Field(min_length=1)
+    rag_collection_ids: tuple[NonEmptyString, ...] = ()
     namespace: NonEmptyString
     version: NonEmptyString
     language: NonEmptyString | None = None
@@ -70,10 +80,16 @@ class QueryKnowledgeOptions(QueryModel):
 
 
 class QueryEvidenceRef(QueryModel):
-    """查询结果指向原始 Wiki/Collection/文档 Part 的证据。"""
+    """查询结果指向 Wiki 文档 Part 的证据。
+
+    ``rag_collection_id`` 和 ``source_origin`` 都只是可选来源标注；Evidence 的
+    最小定位仍由 ``document_id``、``part_id`` 和 ``content_hash`` 构成。
+    """
 
     wiki_id: str = ""
     rag_collection_id: str = ""
+    source_origin: SourceOrigin | None = None
+    source_metadata: dict[str, object] = Field(default_factory=dict)
     document_id: NonEmptyString
     part_id: str = ""
     content_hash: str = ""
@@ -105,6 +121,8 @@ class KnowledgeItem(QueryModel):
     kind: ArtifactType
     wiki_id: NonEmptyString
     rag_collection_ids: tuple[str, ...] = ()
+    source_origin: SourceOrigin | None = None
+    source_metadata: dict[str, object] = Field(default_factory=dict)
     namespace: NonEmptyString
     version: NonEmptyString
     title: NonEmptyString
@@ -243,7 +261,8 @@ class QueryKnowledgeResult(QueryModel):
     query_id: str
     query: str
     wiki_id: str
-    rag_collection_ids: tuple[str, ...]
+    # 兼容旧响应字段；独立 Wiki 查询时为空 tuple。
+    rag_collection_ids: tuple[str, ...] = ()
     namespace: str
     version: str
     found: bool

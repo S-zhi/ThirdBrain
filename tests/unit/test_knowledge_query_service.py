@@ -20,7 +20,7 @@ from src.knowledge import (
     RetrievalHit,
 )
 from src.knowledge.query_service import KnowledgeQueryService
-from src.knowledge.readers import EmptyRelationReader
+from src.knowledge.readers import EmptyRelationReader, KnowledgeReaderError
 
 
 class StaticReader:
@@ -137,13 +137,13 @@ async def test_query_keeps_official_namespace_case_and_drops_out_of_scope() -> N
             _hit(official, RetrievalChannel.EXACT),
             _hit(rewritten, RetrievalChannel.DENSE),
         ),
-        StaticReader(),
         EmptyRelationReader(),
     )
 
     result = await service.query_knowledge("DataCacheCleanAndInvalid", _options())
 
-    assert [item.id for item in result.source_hits] == ["official"]
+    assert [item.id for item in result.knowledge_hits] == ["official"]
+    assert result.source_hits == ()
     assert result.strategy.hard_filters["namespace"] == "AscendC.API.910beta3"
     assert "OUT_OF_SCOPE_RESULT_DROPPED" in result.warnings
 
@@ -156,7 +156,6 @@ async def test_derived_knowledge_without_provenance_is_not_returned() -> None:
         with_provenance=False,
     )
     service = KnowledgeQueryService(
-        StaticReader(),
         StaticReader(_hit(invalid, RetrievalChannel.LEXICAL)),
         EmptyRelationReader(),
     )
@@ -168,41 +167,36 @@ async def test_derived_knowledge_without_provenance_is_not_returned() -> None:
     assert "KNOWLEDGE_WITHOUT_PROVENANCE_DROPPED" in result.warnings
 
 
-async def test_source_without_artifact_returns_enrichment_request_without_writing() -> None:
-    """命中 Source 但缺少派生知识时只返回异步加工请求。"""
+async def test_source_artifact_is_returned_as_knowledge_without_enrichment() -> None:
+    """Knowledge Wiki 中的 source Artifact 也是知识结果，不触碰底层 RAG。"""
     source = _item("api:barrier", kind=ArtifactKind.SOURCE)
     service = KnowledgeQueryService(
         StaticReader(_hit(source, RetrievalChannel.DENSE)),
-        StaticReader(),
         EmptyRelationReader(),
     )
 
     result = await service.query_knowledge("数据同步", _options())
 
     assert result.found
-    assert result.cache_misses[0].document_id == "api:barrier"
-    assert result.enrichment_requests[0].document_id == "api:barrier"
-    assert result.follow_up[0].action == "update_knowledge"
+    assert [item.id for item in result.knowledge_hits] == ["api:barrier"]
+    assert result.source_hits == ()
+    assert result.cache_misses == ()
+    assert result.enrichment_requests == ()
 
 
-async def test_artifact_reader_failure_degrades_to_source_results() -> None:
-    """派生知识后端故障不能阻止返回已有的原始证据。"""
-    source = _item("api:barrier", kind=ArtifactKind.SOURCE)
+async def test_artifact_reader_failure_is_reported_without_source_fallback() -> None:
+    """Knowledge Reader 故障不能偷偷回退查询原始 RAG。"""
     service = KnowledgeQueryService(
-        StaticReader(_hit(source, RetrievalChannel.DENSE)),
         FailingReader(),
         EmptyRelationReader(),
     )
 
-    result = await service.query_knowledge("数据同步", _options())
-
-    assert result.found
-    assert [item.id for item in result.source_hits] == ["api:barrier"]
-    assert "KNOWLEDGE_READER_UNAVAILABLE" in result.warnings
+    with pytest.raises(KnowledgeReaderError, match="派生知识检索不可用"):
+        await service.query_knowledge("数据同步", _options())
 
 
-async def test_artifact_evidence_satisfies_source_cache() -> None:
-    """Artifact 引用了命中 Source 时不应误报缓存缺失。"""
+async def test_artifact_evidence_never_creates_cache_miss() -> None:
+    """Artifact 的证据只随 Knowledge 返回，不生成底层 RAG 缓存缺失。"""
     source = _item("api:barrier", kind=ArtifactKind.SOURCE)
     concept = _item(
         "concept:barrier",
@@ -210,8 +204,10 @@ async def test_artifact_evidence_satisfies_source_cache() -> None:
         document_id="api:barrier",
     )
     service = KnowledgeQueryService(
-        StaticReader(_hit(source, RetrievalChannel.DENSE)),
-        StaticReader(_hit(concept, RetrievalChannel.LEXICAL)),
+        StaticReader(
+            _hit(source, RetrievalChannel.DENSE),
+            _hit(concept, RetrievalChannel.LEXICAL),
+        ),
         EmptyRelationReader(),
     )
 
@@ -219,7 +215,8 @@ async def test_artifact_evidence_satisfies_source_cache() -> None:
 
     assert result.cache_misses == ()
     assert result.enrichment_requests == ()
-    assert [item.id for item in result.knowledge_hits] == ["concept:barrier"]
+    assert {item.id for item in result.knowledge_hits} == {"api:barrier", "concept:barrier"}
+    assert result.source_hits == ()
 
 
 async def test_stale_artifact_is_hidden_unless_explicitly_requested() -> None:
@@ -230,7 +227,6 @@ async def test_stale_artifact_is_hidden_unless_explicitly_requested() -> None:
         status=ArtifactStatus.STALE,
     )
     service = KnowledgeQueryService(
-        StaticReader(),
         StaticReader(_hit(stale, RetrievalChannel.LEXICAL)),
         EmptyRelationReader(),
     )
@@ -250,17 +246,19 @@ async def test_micro_budget_returns_capsule_and_stable_ranking() -> None:
     )
     service = KnowledgeQueryService(
         StaticReader(*hits),
-        StaticReader(),
         EmptyRelationReader(),
     )
 
     first = await service.query_knowledge("cache", _options(budget=QueryBudget.MICRO))
     second = await service.query_knowledge("cache", _options(budget=QueryBudget.MICRO))
 
-    assert first.recall_capsule.count == 3
+    assert 0 < first.recall_capsule.count <= 3
     assert first.budget_report["context_packet"].truncated
-    assert [item.id for item in first.source_hits] == [item.id for item in second.source_hits]
-    assert [item.score for item in first.source_hits] == [item.score for item in second.source_hits]
+    assert [item.id for item in first.knowledge_hits] == [item.id for item in second.knowledge_hits]
+    assert [item.score for item in first.knowledge_hits] == [
+        item.score for item in second.knowledge_hits
+    ]
+    assert first.source_hits == ()
     assert [stage.name for stage in first.trace] == [
         "trigger",
         "recall",
@@ -277,18 +275,19 @@ async def test_graph_expansion_is_bounded_and_participates_in_ranking() -> None:
     graph = StaticGraphReader(_hit(related, RetrievalChannel.GRAPH, score=0.9))
     service = KnowledgeQueryService(
         StaticReader(_hit(source, RetrievalChannel.EXACT)),
-        StaticReader(),
         graph,
     )
 
     result = await service.query_knowledge("primary", _options())
 
     assert graph.seed_ids == ("api:primary",)
-    assert [item.id for item in result.knowledge_hits] == ["concept:related"]
+    assert {item.id for item in result.knowledge_hits} == {"api:primary", "concept:related"}
+    related = next(item for item in result.knowledge_hits if item.id == "concept:related")
+    assert "graph" in related.rank_signals
 
 
-async def test_artifact_outside_top_k_still_satisfies_source_cache() -> None:
-    """展示层 top-k 不能把已经存在的 Artifact 误判为缓存缺失。"""
+async def test_top_k_limits_artifact_results_without_cache_side_effects() -> None:
+    """展示层 top-k 只限制 Knowledge 结果，不生成缓存缺失或加工请求。"""
     source = _item("api:barrier", kind=ArtifactKind.SOURCE)
     concept = _item(
         "concept:barrier",
@@ -296,17 +295,20 @@ async def test_artifact_outside_top_k_still_satisfies_source_cache() -> None:
         document_id="api:barrier",
     )
     service = KnowledgeQueryService(
-        StaticReader(_hit(source, RetrievalChannel.EXACT)),
-        StaticReader(_hit(concept, RetrievalChannel.LEXICAL)),
+        StaticReader(
+            _hit(source, RetrievalChannel.EXACT),
+            _hit(concept, RetrievalChannel.LEXICAL),
+        ),
         EmptyRelationReader(),
     )
 
     result = await service.query_knowledge("barrier", _options(top_k=1))
 
-    assert result.knowledge_hits == ()
+    assert len(result.knowledge_hits) == 1
+    assert result.source_hits == ()
     assert result.cache_misses == ()
     assert result.enrichment_requests == ()
-    assert result.budget_report["knowledge_artifacts"].available == 1
+    assert result.budget_report["knowledge_artifacts"].available == 2
     assert result.budget_report["knowledge_artifacts"].truncated
 
 
@@ -315,14 +317,14 @@ async def test_weak_dense_only_result_recommends_abstention() -> None:
     source = _item("api:weak", kind=ArtifactKind.SOURCE)
     service = KnowledgeQueryService(
         StaticReader(_hit(source, RetrievalChannel.DENSE, score=0.01)),
-        StaticReader(),
         EmptyRelationReader(),
     )
 
     result = await service.query_knowledge("unrelated question", _options())
 
     assert result.found
-    assert result.source_hits[0].match_confidence == "weak"
+    assert result.knowledge_hits[0].match_confidence == "weak"
+    assert result.source_hits == ()
     assert result.abstention.recommended
     assert "WEAK_MATCHES_ONLY" in result.warnings
 
@@ -340,7 +342,6 @@ async def test_cross_collection_provenance_is_removed_before_return() -> None:
     )
     item = item.model_copy(update={"provenance": (*item.provenance, foreign)})
     service = KnowledgeQueryService(
-        StaticReader(),
         StaticReader(_hit(item, RetrievalChannel.EXACT)),
         EmptyRelationReader(),
     )
@@ -374,7 +375,6 @@ async def test_micro_packet_never_exceeds_hard_character_budget() -> None:
         }
     )
     service = KnowledgeQueryService(
-        StaticReader(),
         StaticReader(_hit(item, RetrievalChannel.EXACT)),
         EmptyRelationReader(),
     )
@@ -397,7 +397,6 @@ async def test_reader_cancellation_is_not_swallowed_as_degradation() -> None:
 
     service = KnowledgeQueryService(
         CancelledReader(),
-        StaticReader(),
         EmptyRelationReader(),
     )
 

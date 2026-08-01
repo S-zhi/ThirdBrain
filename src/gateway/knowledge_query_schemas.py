@@ -18,11 +18,15 @@ class KnowledgeGatewayModel(BaseModel):
 
 
 class KnowledgeQueryRequest(KnowledgeGatewayModel):
-    """一次带强制 namespace/version 的上层知识查询。"""
+    """一次带强制 namespace/version 的上层知识查询。
+
+    ``rag_collection_ids`` 保留为旧客户端的可选过滤器。省略它表示查询整个
+    独立 LLM Wiki，而不是让 Gateway 去连接底层 RAG。
+    """
 
     query: NonEmptyString
     wiki_id: NonEmptyString
-    rag_collection_ids: tuple[NonEmptyString, ...] = Field(min_length=1)
+    rag_collection_ids: tuple[NonEmptyString, ...] = ()
     namespace: NonEmptyString
     version: NonEmptyString
     language: NonEmptyString | None = None

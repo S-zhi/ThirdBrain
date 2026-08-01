@@ -218,6 +218,106 @@ class MongoKnowledgeRepository:
                 )
         return tuple(sorted(artifacts, key=lambda artifact: artifact.artifact_id))
 
+    async def list_active_artifact_revisions(
+        self,
+        wiki_id: str | None = None,
+        namespace: str | None = None,
+        version: str | None = None,
+    ) -> tuple[ArtifactRevision, ...]:
+        """从正式 Catalog 指针读取完整 active Artifact Revision。
+
+        ``knowledge_artifact_revisions`` 本身是不可变历史，不能仅按
+        ``status=active`` 查询：历史 Revision 可能仍然带有 active 状态。
+        因此先读取 Catalog 的当前 Artifact 指针，再按 revision id 反查，保证
+        索引重建只使用当前正式可达的知识。所有 scope 参数为空时扫描全部 Wiki
+        的 Catalog；参数非空时在 Revision 字段上继续做精确过滤。
+        """
+
+        catalogs: list[dict[str, Any]] = []
+        if wiki_id is not None:
+            catalog = await self._active_catalog(wiki_id)
+            if catalog is not None:
+                catalogs.append(catalog)
+        else:
+            collection = self._catalog()
+            started = time.perf_counter()
+            try:
+                cursor = collection.find({})
+                catalogs = [doc async for doc in cursor]
+            except PyMongoError as error:
+                log_op(
+                    operation="find",
+                    collection=collection.name,
+                    started=started,
+                    success=False,
+                    error_type=type(error).__name__,
+                )
+                raise remap_pymongo_error(error) from error
+            log_op(
+                operation="find",
+                collection=collection.name,
+                started=started,
+                result_count=len(catalogs),
+            )
+
+        revision_ids: set[str] = set()
+        for catalog in catalogs:
+            pointers = catalog.get("artifacts") or {}
+            if not isinstance(pointers, dict):
+                continue
+            for pointer in pointers.values():
+                if not isinstance(pointer, dict):
+                    continue
+                if pointer.get("status") != ArtifactStatus.ACTIVE.value:
+                    continue
+                revision_id = pointer.get("artifact_revision_id")
+                if isinstance(revision_id, str) and revision_id:
+                    revision_ids.add(revision_id)
+        if not revision_ids:
+            return ()
+
+        collection = self._artifacts()
+        started = time.perf_counter()
+        try:
+            cursor = collection.find({"_id": {"$in": sorted(revision_ids)}})
+            docs = [doc async for doc in cursor]
+        except PyMongoError as error:
+            log_op(
+                operation="find",
+                collection=collection.name,
+                started=started,
+                success=False,
+                error_type=type(error).__name__,
+            )
+            raise remap_pymongo_error(error) from error
+        log_op(
+            operation="find", collection=collection.name, started=started, result_count=len(docs)
+        )
+
+        found_ids = {
+            str(document.get("_id")) for document in docs if isinstance(document.get("_id"), str)
+        }
+        missing_ids = sorted(revision_ids - found_ids)
+        if missing_ids:
+            raise RuntimeError(
+                "active knowledge catalog points to missing artifact revisions: "
+                + ", ".join(missing_ids)
+            )
+
+        revisions: list[ArtifactRevision] = []
+        for doc in docs:
+            revision = ArtifactRevision.model_validate(_without_mongo_id(doc))
+            if revision.status != ArtifactStatus.ACTIVE:
+                continue
+            if wiki_id is not None and revision.wiki_id != wiki_id:
+                continue
+            if namespace is not None and revision.draft.namespace != namespace:
+                continue
+            if version is not None and revision.draft.version != version:
+                continue
+            revisions.append(revision)
+        return tuple(sorted(revisions, key=lambda artifact: artifact.artifact_id))
+
     async def stage(
         self,
         operation_id: str,

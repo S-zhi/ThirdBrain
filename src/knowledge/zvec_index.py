@@ -38,6 +38,31 @@ FIELD_PROVENANCE_JSON = "provenance_json"
 DEFAULT_KNOWLEDGE_COLLECTION = "knowledge_wiki_v1"
 
 
+def _escape_filter(value: str) -> str:
+    """转义 Zvec 过滤表达式中的字符串字面量。"""
+
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _knowledge_scope_filter(
+    *,
+    wiki_id: str | None = None,
+    namespace: str | None = None,
+    version: str | None = None,
+) -> str:
+    """构造索引清理/校验共用的精确 Scope 过滤器。"""
+
+    clauses = [f"{FIELD_ARTIFACT_ID} != ''"]
+    for field, value in (
+        (FIELD_WIKI_ID, wiki_id),
+        (FIELD_NAMESPACE, namespace),
+        (FIELD_VERSION, version),
+    ):
+        if value is not None:
+            clauses.append(f"{field} = '{_escape_filter(value)}'")
+    return " AND ".join(clauses)
+
+
 def get_knowledge_collection_schema(
     name: str = DEFAULT_KNOWLEDGE_COLLECTION,
 ) -> zvec.CollectionSchema:
@@ -185,6 +210,111 @@ class ZvecKnowledgeIndexWriter:
         if not artifacts:
             return
         await asyncio.to_thread(self._upsert_sync, artifacts)
+
+    async def rebuild(
+        self,
+        artifacts: tuple[ArtifactRevision, ...],
+        *,
+        wiki_id: str | None = None,
+        namespace: str | None = None,
+        version: str | None = None,
+    ) -> None:
+        """按正式 Catalog 快照重建指定 Scope 的派生索引。
+
+        Zvec 0.6 提供 ``delete_by_filter``，所以可以先清理当前 Scope，再
+        重新写入 active Revision。删除只发生在 Knowledge 自己的 collection，
+        不会触碰底层 API RAG collection；如果 embedding 或写入失败，Mongo
+        正式知识仍然保持不变，调用方会得到失败结果并可再次重建。
+        """
+
+        await asyncio.to_thread(
+            self._rebuild_sync,
+            artifacts,
+            wiki_id=wiki_id,
+            namespace=namespace,
+            version=version,
+        )
+
+    def _rebuild_sync(
+        self,
+        artifacts: tuple[ArtifactRevision, ...],
+        *,
+        wiki_id: str | None,
+        namespace: str | None,
+        version: str | None,
+    ) -> None:
+        """同步执行 Scope 清理和完整 Artifact 投影。"""
+
+        schema = get_knowledge_collection_schema(self._collection_name)
+        embedder: Embedder | None = None
+        try:
+            with CollectionSession(self._collection_name, schema=schema) as collection:
+                collection.delete_by_filter(
+                    _knowledge_scope_filter(
+                        wiki_id=wiki_id,
+                        namespace=namespace,
+                        version=version,
+                    )
+                )
+                if not artifacts:
+                    return
+                embedder = self._embedder_factory()
+                texts = [artifact_index_text(artifact) for artifact in artifacts]
+                embedder.fit_sparse(texts)
+                for artifact in artifacts:
+                    collection.upsert(artifact_to_zvec_doc(artifact, embedder))
+                collection.flush()
+        finally:
+            if embedder is not None:
+                embedder.close()
+
+    async def check_consistency(
+        self,
+        artifacts: tuple[ArtifactRevision, ...],
+        *,
+        wiki_id: str | None = None,
+        namespace: str | None = None,
+        version: str | None = None,
+    ) -> dict[str, object]:
+        """检查期望的 Artifact ID 是否都存在于 Zvec。
+
+        Zvec 0.6 没有稳定的全量 ID 枚举接口，因此无法在这里可靠统计 Scope
+        外的孤儿文档；返回 ``orphan_count=None``，由维护工具在支持枚举的
+        后端上补充。缺失 ID 会明确列出，便于下一次重建。
+        """
+
+        del wiki_id, namespace, version
+        return await asyncio.to_thread(self._check_consistency_sync, artifacts)
+
+    def _check_consistency_sync(self, artifacts: tuple[ArtifactRevision, ...]) -> dict[str, object]:
+        """同步检查预期 ID；只读打开失败时交给上层记录为 warning。"""
+
+        expected_ids = tuple(dict.fromkeys(artifact.artifact_id for artifact in artifacts))
+        try:
+            with CollectionSession(self._collection_name, read_only=True) as collection:
+                if not expected_ids:
+                    return {
+                        "expected_count": 0,
+                        "present_count": 0,
+                        "missing_artifact_ids": (),
+                        "orphan_count": None,
+                    }
+                present = collection.fetch(ids=list(expected_ids), include_vector=False)
+        except Exception as error:  # noqa: BLE001 - consistency is best effort
+            return {
+                "expected_count": len(expected_ids),
+                "present_count": 0,
+                "missing_artifact_ids": expected_ids,
+                "orphan_count": None,
+                "error": f"{type(error).__name__}: {error}",
+            }
+        present_ids = set(present or {})
+        return {
+            "expected_count": len(expected_ids),
+            "present_count": len(present_ids),
+            "missing_artifact_ids": tuple(sorted(set(expected_ids) - present_ids)),
+            "orphan_count": None,
+        }
 
     def _upsert_sync(self, artifacts: tuple[ArtifactRevision, ...]) -> None:
         """建立 sparse corpus 后生成向量并 upsert，始终释放 embedder 资源。"""

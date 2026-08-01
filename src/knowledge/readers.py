@@ -1,4 +1,4 @@
-"""Knowledge 查询面的只读 Reader 协议与现有 Zvec Source 适配器。"""
+"""Knowledge Wiki 查询面的只读 Reader 协议与独立 Artifact 适配器。"""
 
 from __future__ import annotations
 
@@ -9,12 +9,11 @@ from typing import Protocol
 
 import zvec
 
-from src.dao.emb import SearchResult
 from src.dao.emb.director import CollectionSession
 from src.dao.emb.embedder import Embedder, build_embedder
 from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
 from src.knowledge.contracts import KnowledgeRepository
-from src.knowledge.models import ActiveArtifact, ArtifactStatus, ArtifactType, Confidence
+from src.knowledge.models import ActiveArtifact, ArtifactStatus, Confidence
 from src.knowledge.query_contracts import (
     KnowledgeItem,
     QueryEvidenceRef,
@@ -33,13 +32,6 @@ from src.knowledge.zvec_index import (
     FIELD_VERSION,
     FIELD_WIKI_ID,
 )
-from src.service.agent_query_service import (
-    AgentQueryCommand,
-    AgentQueryFilters,
-    AgentQueryRetriever,
-    AgentQueryType,
-    ZvecAgentQueryRetriever,
-)
 
 
 class KnowledgeReaderError(RuntimeError):
@@ -49,7 +41,7 @@ class KnowledgeReaderError(RuntimeError):
 
 
 class KnowledgeReader(Protocol):
-    """Source 或派生 Artifact Reader 的统一只读协议。"""
+    """派生 Knowledge Artifact Reader 的统一只读协议。"""
 
     async def search(
         self,
@@ -110,137 +102,6 @@ def _string_field(fields: dict[str, object], name: str) -> str:
     """将 Zvec 可选字段稳定转换为字符串。"""
     value = fields.get(name, "")
     return value if isinstance(value, str) else str(value or "")
-
-
-def _source_item(
-    result: SearchResult,
-    options: QueryKnowledgeOptions,
-    rag_collection_id: str,
-) -> KnowledgeItem:
-    """把现有 API 文档命中投影为上层 Knowledge Source。"""
-    fields = dict(result.fields)
-    document_id = _string_field(fields, "api_id") or result.doc_id
-    namespace = _string_field(fields, "namespace")
-    version = _string_field(fields, "version")
-    name = _string_field(fields, "name") or document_id
-    api_name = _string_field(fields, "api_name")
-    title = api_name or name
-    aliases = tuple(value for value in (name, api_name) if value and value != title)
-    return KnowledgeItem(
-        id=document_id,
-        kind=ArtifactType.SOURCE,
-        wiki_id=options.scope.wiki_id,
-        rag_collection_ids=(rag_collection_id,),
-        namespace=namespace,
-        version=version,
-        title=title,
-        summary=_string_field(fields, "description"),
-        content=_string_field(fields, "source_markdown"),
-        language=_string_field(fields, "language") or None,
-        confidence=Confidence.HIGH,
-        aliases=aliases,
-        provenance=(
-            QueryEvidenceRef(
-                wiki_id=options.scope.wiki_id,
-                rag_collection_id=rag_collection_id,
-                document_id=document_id,
-                part_id=document_id,
-                version=version,
-            ),
-        ),
-    )
-
-
-class ZvecSourceKnowledgeReader:
-    """复用底层 RAG exact/dense 能力的上层 Source Reader。"""
-
-    def __init__(self, retriever: AgentQueryRetriever, rag_collection_id: str) -> None:
-        self._retriever = retriever
-        self._rag_collection_id = rag_collection_id
-
-    @staticmethod
-    def _command(
-        query: str,
-        options: QueryKnowledgeOptions,
-        query_type: AgentQueryType,
-        limit: int,
-    ) -> AgentQueryCommand:
-        return AgentQueryCommand(
-            query=query,
-            query_type=query_type,
-            top_k=limit,
-            filters=AgentQueryFilters(
-                namespace=options.scope.namespace,
-                version=options.scope.version,
-                language=options.scope.language,
-            ),
-        )
-
-    async def search(
-        self,
-        query: str,
-        options: QueryKnowledgeOptions,
-        *,
-        limit: int,
-    ) -> ReaderSearchResult:
-        """并行执行 exact 与 dense；允许单通道降级但不掩盖双失败。"""
-        requested = options.scope.rag_collection_ids
-        if requested and self._rag_collection_id not in requested:
-            return ReaderSearchResult(warnings=("SOURCE_COLLECTION_OUT_OF_SCOPE",))
-        exact_command = self._command(query, options, AgentQueryType.NAME, limit)
-        dense_command = self._command(query, options, AgentQueryType.SEMANTIC, limit)
-        outcomes = await asyncio.gather(
-            asyncio.to_thread(self._retriever.query_name, exact_command),
-            asyncio.to_thread(self._retriever.query_semantic, dense_command),
-            return_exceptions=True,
-        )
-        exact = outcomes[0]
-        dense = outcomes[1]
-
-        warnings: list[str] = []
-        hits: list[RetrievalHit] = []
-        failures = 0
-        if isinstance(exact, BaseException):
-            if not isinstance(exact, Exception):
-                raise exact
-            failures += 1
-            warnings.append("SOURCE_EXACT_RETRIEVAL_DEGRADED")
-        else:
-            hits.extend(
-                RetrievalHit(
-                    channel=RetrievalChannel.EXACT,
-                    ranking="source:exact",
-                    item=_source_item(result, options, self._rag_collection_id),
-                    raw_score=result.score,
-                )
-                for result in exact
-            )
-        if isinstance(dense, BaseException):
-            if not isinstance(dense, Exception):
-                raise dense
-            failures += 1
-            warnings.append("SOURCE_DENSE_RETRIEVAL_DEGRADED")
-        else:
-            hits.extend(
-                RetrievalHit(
-                    channel=RetrievalChannel.DENSE,
-                    ranking="source:dense",
-                    item=_source_item(result, options, self._rag_collection_id),
-                    raw_score=result.score,
-                )
-                for result in dense
-            )
-        if failures == 2:
-            raise KnowledgeReaderError("原始文档检索暂不可用")
-        return ReaderSearchResult(hits=tuple(hits), warnings=tuple(warnings))
-
-
-def build_zvec_source_reader(collection_name: str) -> ZvecSourceKnowledgeReader:
-    """按当前生产 RAG Profile 组装只读 Source Reader。"""
-    return ZvecSourceKnowledgeReader(
-        ZvecAgentQueryRetriever(collection_name),
-        rag_collection_id=collection_name,
-    )
 
 
 @dataclass(frozen=True, slots=True)

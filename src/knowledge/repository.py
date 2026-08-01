@@ -81,6 +81,37 @@ class InMemoryKnowledgeRepository:
         ]
         return tuple(sorted(selected, key=lambda artifact: artifact.artifact_id))
 
+    async def list_active_artifact_revisions(
+        self,
+        wiki_id: str | None = None,
+        namespace: str | None = None,
+        version: str | None = None,
+    ) -> tuple[ArtifactRevision, ...]:
+        """返回 Catalog 当前指向的完整 active Revision。
+
+        这个读取端口专供索引重建使用。它只从 ``_active_artifacts`` 的指针
+        反查不可变 Revision，不会把 staging、待审核或历史版本误当作索引
+        输入；三个过滤参数都为空时扫描全部 Wiki。
+        """
+
+        selected: list[ArtifactRevision] = []
+        for active in self._active_artifacts.values():
+            if wiki_id is not None and active.wiki_id != wiki_id:
+                continue
+            if namespace is not None and active.draft.namespace != namespace:
+                continue
+            if version is not None and active.draft.version != version:
+                continue
+            revision = self._artifact_revisions.get(active.artifact_revision_id)
+            if revision is None:
+                raise RuntimeError(
+                    "active knowledge artifact pointer references a missing revision: "
+                    f"{active.artifact_revision_id}"
+                )
+            if revision.status == ArtifactStatus.ACTIVE:
+                selected.append(revision.model_copy(deep=True))
+        return tuple(sorted(selected, key=lambda artifact: artifact.artifact_id))
+
     async def stage(
         self,
         operation_id: str,

@@ -16,11 +16,11 @@ from src.knowledge import (
     RetrievalHit,
 )
 from src.knowledge.query_service import KnowledgeQueryService
-from src.knowledge.readers import EmptyKnowledgeReader, EmptyRelationReader
+from src.knowledge.readers import EmptyRelationReader
 
 
-class SourceReader:
-    """Gateway 测试使用的固定 Source Reader。"""
+class ArtifactReader:
+    """Gateway 测试使用的固定 Knowledge Artifact Reader。"""
 
     async def search(self, query, options, *, limit):
         del query, limit
@@ -28,7 +28,7 @@ class SourceReader:
             id="AscendC.API.910beta3.Barrier",
             kind=ArtifactKind.SOURCE,
             wiki_id=options.scope.wiki_id,
-            rag_collection_ids=options.scope.rag_collection_ids,
+            rag_collection_ids=(),
             namespace=options.scope.namespace,
             version=options.scope.version,
             title="Barrier",
@@ -36,7 +36,7 @@ class SourceReader:
             provenance=(
                 QueryEvidenceRef(
                     wiki_id=options.scope.wiki_id,
-                    rag_collection_id=options.scope.rag_collection_ids[0],
+                    rag_collection_id="",
                     document_id="AscendC.API.910beta3.Barrier",
                     part_id="part-1",
                     content_hash="sha256:test",
@@ -59,8 +59,7 @@ def _client(*, bypass_auth: bool = True) -> TestClient:
     """构造只装配 Knowledge 路由的测试应用。"""
     app = FastAPI()
     app.state.knowledge_query_service = KnowledgeQueryService(
-        SourceReader(),
-        EmptyKnowledgeReader(),
+        ArtifactReader(),
         EmptyRelationReader(),
     )
     if bypass_auth:
@@ -74,7 +73,6 @@ def _failed_client() -> TestClient:
     app = FastAPI()
     app.state.knowledge_query_service = KnowledgeQueryService(
         FailingReader(),
-        FailingReader(),
         EmptyRelationReader(),
     )
     app.dependency_overrides[require_service_auth] = lambda: None
@@ -86,7 +84,6 @@ def _payload() -> dict[str, object]:
     return {
         "query": "Barrier",
         "wiki_id": "wiki:test",
-        "rag_collection_ids": ["rag:test"],
         "namespace": "AscendC.API.910beta3",
         "version": "910beta3",
         "budget": "micro",
@@ -103,7 +100,7 @@ def test_gateway_requires_versioned_scope() -> None:
     assert response.status_code == 422
 
 
-def test_gateway_returns_capsule_provenance_and_enrichment_request() -> None:
+def test_gateway_returns_knowledge_capsule_provenance_without_enrichment() -> None:
     """Gateway 应完整返回机器可消费的上层查询协议。"""
     response = _client().post("/api/v1/knowledge/query", json=_payload())
 
@@ -112,7 +109,10 @@ def test_gateway_returns_capsule_provenance_and_enrichment_request() -> None:
     assert body["found"] is True
     assert body["namespace"] == "AscendC.API.910beta3"
     assert body["recall_capsule"]["items"][0]["provenance"][0]["part_id"] == "part-1"
-    assert body["enrichment_requests"][0]["document_id"].endswith("Barrier")
+    assert body["knowledge_hits"][0]["id"].endswith("Barrier")
+    assert body["source_hits"] == []
+    assert body["cache_misses"] == []
+    assert body["enrichment_requests"] == []
     assert body["trace"][-1]["status"] == "delegated"
 
 
@@ -123,7 +123,7 @@ def test_gateway_maps_total_reader_failure_to_503() -> None:
     assert response.status_code == 503
     assert response.json() == {
         "code": "KNOWLEDGE_READER_UNAVAILABLE",
-        "message": "原始文档和派生知识检索均不可用",
+        "message": "派生知识检索不可用",
     }
 
 

@@ -1,8 +1,8 @@
 # Knowledge Update Plane
 
-本文定义上层 LLM Knowledge Wiki 的写入面。它与现有底层 API RAG 分层：底层
-RAG 负责保留与召回原始 API 文档；上层只把经过证据校验的派生知识写入独立的
-Knowledge Wiki。
+本文定义上层 LLM Knowledge Wiki 的写入面。它与现有底层 API RAG 完全独立：文档由外部
+导入组件直接提交；上层只把经过证据校验的派生知识写入独立的 Knowledge Wiki。Knowledge
+写入面不读取、不调用原来的 API RAG。
 
 ## 边界
 
@@ -13,22 +13,29 @@ update_knowledge(documents, options) -> UpdateResult
 update_wiki(WikiUpdateInput, options) -> UpdateResult
 ```
 
+应用 Gateway：
+
+```text
+POST /api/v1/knowledge/update
+```
+
+该接口只接收 Wiki 文档和更新选项，不接收原 API RAG 的 Collection 句柄。没有配置 LLM
+Provider 时，接口返回脱敏的 `503 KNOWLEDGE_UPDATE_DISABLED`，只读查询仍可运行。
+
 它负责：原始 Source/Part 修订、LLM 结构化提取、证据校验、保守合并、staging、
 发布和派生索引刷新。
 
 它不负责：在线查询、回答生成、自动保存 exploration、用户偏好 memory，或修改
 底层 RAG 的原始 API 文档。
 
-一个 `WikiUpdateInput` 代表一个上层 Knowledge Wiki，它包含多个 `RagCollectionInput`。
-每个底层 RAG Collection 都有精确的 `rag_collection_id`；每份 Source 同时带有
-`wiki_id + rag_collection_id`。同一 Wiki 内不同 Collection 的同名知识可在严格身份
-一致时合并；不同 Wiki 则在 Source、Artifact、catalog 和 Zvec 过滤字段上完全隔离。
+一个 `WikiUpdateInput` 代表一个上层 Knowledge Wiki，它包含多个文档输入。文档可以带有
+可选的 `SourceOrigin` 作为来源备注，但 Wiki 不要求来源系统是 RAG，也不会根据来源备注
+访问外部系统。不同 Wiki 则在 Source、Artifact、catalog 和 Zvec 过滤字段上完全隔离。
 
 ## 不变量
 
 - `wiki_id` 是上层知识域的强制隔离边界；每次 `update_knowledge` 只能处理一个 Wiki。
-- `rag_collection_id` 是 Source provenance 的强制字段；同一 document_id 可以出现在
-  不同 Collection，不能因此覆盖或混淆来源。
+- `SourceOrigin` 是可选 provenance 元数据；它不参与 Knowledge 查询或 Artifact 身份。
 - `namespace` 与 `version` 原样存储，保留官方大小写；任何大小写归一化仅能用于
   未来读侧的候选匹配，不能用作实体身份或自动合并依据。
 - 输入的 `parts` 是原始边界，必须保留 `part_id`、父子关系和顺序。二级检索 chunk
@@ -75,10 +82,9 @@ fingerprint。`ZvecKnowledgeIndexWriter` 则把**已发布**的 Artifact Revisio
 因此部署时的依赖方向固定为：
 
 ```text
-RAG Collection A --\
-RAG Collection B ----> WikiUpdateInput -> OpenAIKnowledgeExtractor -> KnowledgeUpdateService
-RAG Collection N --/                                      |-> MongoKnowledgeRepository
-                                                          |-> ZvecKnowledgeIndexWriter
+Document intake ------> WikiUpdateInput -> OpenAIKnowledgeExtractor -> KnowledgeUpdateService
+                                                               |-> MongoKnowledgeRepository
+                                                               |-> ZvecKnowledgeIndexWriter
 ```
 
 任意一个适配器都可以通过其 Protocol 端口替换；例如离线评测可注入本地 extractor 和

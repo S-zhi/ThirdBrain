@@ -61,6 +61,7 @@ data/
 /yaml/
 /benchmark/generate/generate_isok_data/md/
 /benchmark/generate/generate_isok_data_by_llm/
+/benchmark/cannjudge/generated/
 /.claude/skills/gitnexus/gitnexus-cli/SKILL.md
 /.claude/skills/gitnexus/gitnexus-debugging/SKILL.md
 /.claude/skills/gitnexus/gitnexus-exploring/SKILL.md

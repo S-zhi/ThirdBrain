@@ -102,10 +102,11 @@ def stable_source_id(
 ) -> str:
     """为一个原始逻辑文档生成仅供存储使用的安全稳定 ID。
 
-    ``wiki_id`` 是上层 Knowledge Wiki 的隔离边界；一个 Wiki 可以汇总多个
-    底层 RAG collection，但不同 Wiki 的同名 Source 绝不共享状态。原文
+    ``wiki_id`` 是上层 Knowledge Wiki 的隔离边界；旧版本用
+    ``rag_collection_id`` 区分同一 Wiki 内的 Source。该参数现在允许使用空字符串，
+    代表文档直接进入独立 Wiki、没有底层 RAG collection 标识。原文
     ``namespace``/``version`` 仍独立落字段，哈希只避免 Mongo map key 因特殊字符
-    产生歧义，不能替代对原字段的精确比较。
+    产生歧义，不能替代对原字段的精确比较。为了兼容已有 revision，哈希格式保持不变。
     """
 
     return "src_" + sha256_text(
@@ -152,17 +153,36 @@ class SourcePart(KnowledgeModel):
         return sha256_text(self.content)
 
 
+class SourceOrigin(KnowledgeModel):
+    """可选的来源描述，不代表对外部系统的运行时依赖。
+
+    ``SourceOrigin`` 只用于在 LLM Wiki 中标注文档来自哪里。Knowledge 写入和查询
+    不会根据这些字段去访问外部 RAG 或其它来源系统；字段缺失时文档仍然是合法的
+    Wiki 文档。
+    """
+
+    system: str | None = Field(default=None, max_length=256)
+    collection: str | None = Field(default=None, max_length=512)
+    path: str | None = Field(default=None, max_length=4096)
+    url: str | None = Field(default=None, max_length=4096)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class KnowledgeDocumentInput(KnowledgeModel):
     """update_knowledge 接收的一个完整逻辑文档。"""
 
     document_id: str = Field(min_length=1, max_length=256)
     wiki_id: str = Field(min_length=1, max_length=256)
-    rag_collection_id: str = Field(min_length=1, max_length=512)
+    # 兼容旧写入链路的字段。空字符串表示该 Wiki 文档没有外部 RAG collection
+    # 身份，不能据此推断 Knowledge 会读取或调用某个底层 RAG。
+    rag_collection_id: str = Field(default="", max_length=512)
     namespace: str = Field(min_length=1, max_length=512)
     version: str = Field(min_length=1, max_length=128)
     content_hash: str = Field(min_length=16, max_length=128)
     source_path: str | None = Field(default=None, max_length=4096)
     source_url: str | None = Field(default=None, max_length=4096)
+    source_origin: SourceOrigin | None = None
+    source_metadata: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     parts: tuple[SourcePart, ...] = Field(min_length=1)
 
@@ -209,19 +229,23 @@ class KnowledgeDocumentInput(KnowledgeModel):
 
 
 class RagCollectionInput(KnowledgeModel):
-    """一个底层 RAG Collection 本次提供给 Wiki 的文档批次。"""
+    """兼容旧调用方的文档批次分组。
 
-    rag_collection_id: str = Field(min_length=1, max_length=512)
+    新的独立 LLM Wiki 可以省略 ``rag_collection_id``，此时该分组仅用于批量
+    组织输入，不会建立任何底层 RAG 运行时连接。
+    """
+
+    rag_collection_id: str = Field(default="", max_length=512)
     documents: tuple[KnowledgeDocumentInput, ...] = Field(min_length=1)
 
     @model_validator(mode="after")
     def validate_collection_binding(self) -> RagCollectionInput:
-        """阻止调用方把文档错误归属到另一个 RAG Collection。"""
+        """仅在提供旧 collection 标识时校验双向归属。"""
 
         invalid = [
             document.document_id
             for document in self.documents
-            if document.rag_collection_id != self.rag_collection_id
+            if self.rag_collection_id and document.rag_collection_id != self.rag_collection_id
         ]
         if invalid:
             raise ValueError(f"documents 的 rag_collection_id 不匹配: {invalid}")
@@ -229,7 +253,11 @@ class RagCollectionInput(KnowledgeModel):
 
 
 class WikiUpdateInput(KnowledgeModel):
-    """一个上层 Knowledge Wiki 对多个底层 RAG Collection 的统一写入请求。"""
+    """一个上层 Knowledge Wiki 的统一写入请求。
+
+    ``rag_collections`` 是历史批量输入形状，保留它是为了不破坏旧调用方；每个
+    分组可以省略 collection 标识，Wiki 仍可独立接收文档。
+    """
 
     wiki_id: str = Field(min_length=1, max_length=256)
     rag_collections: tuple[RagCollectionInput, ...] = Field(min_length=1)
@@ -238,7 +266,11 @@ class WikiUpdateInput(KnowledgeModel):
     def validate_wiki_binding(self) -> WikiUpdateInput:
         """确保一次 Wiki 更新只有一个上层隔离域，且 collection 不重复。"""
 
-        collection_ids = [collection.rag_collection_id for collection in self.rag_collections]
+        collection_ids = [
+            collection.rag_collection_id
+            for collection in self.rag_collections
+            if collection.rag_collection_id
+        ]
         if len(collection_ids) != len(set(collection_ids)):
             raise ValueError("一个 Wiki 请求内 rag_collection_id 必须唯一")
         invalid = [

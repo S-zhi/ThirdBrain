@@ -18,11 +18,11 @@ from src.knowledge import (
     RetrievalHit,
 )
 from src.knowledge.query_service import KnowledgeQueryService
-from src.knowledge.readers import EmptyKnowledgeReader, EmptyRelationReader
+from src.knowledge.readers import EmptyRelationReader
 
 
-class BenchmarkSourceReader:
-    """Golden case 使用的确定性 Source 语料。"""
+class BenchmarkArtifactReader:
+    """Golden case 使用的确定性 Knowledge Artifact 语料。"""
 
     async def search(self, query, options, *, limit):
         del limit
@@ -37,7 +37,7 @@ class BenchmarkSourceReader:
                 id=item_id,
                 kind=ArtifactKind.SOURCE,
                 wiki_id=options.scope.wiki_id,
-                rag_collection_ids=options.scope.rag_collection_ids,
+                rag_collection_ids=(),
                 namespace=options.scope.namespace,
                 version=options.scope.version,
                 title=item_id.rsplit(".", 1)[-1],
@@ -46,7 +46,7 @@ class BenchmarkSourceReader:
                 provenance=(
                     QueryEvidenceRef(
                         wiki_id=options.scope.wiki_id,
-                        rag_collection_id=options.scope.rag_collection_ids[0],
+                        rag_collection_id="",
                         document_id=item_id,
                         part_id=f"part-{index}",
                         content_hash="sha256:benchmark",
@@ -73,8 +73,7 @@ async def test_knowledge_query_v1_cases_execute_core_regressions() -> None:
     path = Path(__file__).parent / "cases" / "knowledge_query_v1.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     service = KnowledgeQueryService(
-        BenchmarkSourceReader(),
-        EmptyKnowledgeReader(),
+        BenchmarkArtifactReader(),
         EmptyRelationReader(),
     )
 
@@ -85,19 +84,19 @@ async def test_knowledge_query_v1_cases_execute_core_regressions() -> None:
             QueryKnowledgeOptions(
                 scope=QueryScope(
                     wiki_id=case["wiki_id"],
-                    rag_collection_ids=tuple(case["rag_collection_ids"]),
+                    rag_collection_ids=tuple(case.get("rag_collection_ids", ())),
                     namespace=case["namespace"],
                     version=case["version"],
                 ),
                 budget=QueryBudget.MICRO,
             ),
         )
-        result_ids = {item.id for item in (*result.source_hits, *result.knowledge_hits)}
+        result_ids = {item.id for item in result.knowledge_hits}
+        assert result.source_hits == ()
+        assert result.cache_misses == ()
+        assert result.enrichment_requests == ()
         assert set(case.get("expected_ids", ())).issubset(result_ids)
         assert result_ids.isdisjoint(case.get("forbidden_ids", ()))
-        assert set(case.get("expected_enrichment", ())).issubset(
-            {request.document_id for request in result.enrichment_requests}
-        )
         if case.get("require_provenance"):
             assert result.recall_capsule.items
             assert all(item.provenance for item in result.recall_capsule.items)
