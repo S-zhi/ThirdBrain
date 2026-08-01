@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 import gc
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import zvec
@@ -46,10 +46,10 @@ from src.dao.emb.indexer import (
     update_doc as _low_update_doc,
 )
 
+
 # ---------------------------------------------------------------------------
 # DirectorDoc：CRUD 唯一识别的 canonical document 对象
 # ---------------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class DirectorDoc:
     """CRUD 层唯一识别的 canonical document 对象。
@@ -71,6 +71,7 @@ class DirectorDoc:
 
     record: ApiDocumentLike
     embedder: Embedder
+    projector: Callable[[ApiDocumentLike], zvec.Doc] = from_orm
 
     @property
     def doc_id(self) -> str:
@@ -80,17 +81,17 @@ class DirectorDoc:
     def to_zvec(self) -> zvec.Doc:
         """转成带 dense + sparse 向量的 :class:`zvec.Doc`。
 
-        内部走 :func:`src.dao.emb.doc.from_orm` 拼 fields，
+        默认走 :func:`src.dao.emb.doc.from_orm` 拼 fields；RAG Profile 也可注入
+        自己的 ``projector``，让 YAML Schema 的字段映射与写入路径保持一致。
         再走 :func:`src.dao.emb.indexer._attach_vectors` 调 embedder。
         返回的是新 doc；不修改 self。
         """
-        return _attach_vectors(from_orm(self.record), self.embedder)
+        return _attach_vectors(self.projector(self.record), self.embedder)
 
 
 # ---------------------------------------------------------------------------
 # CollectionSession：collection 句柄的 context manager
 # ---------------------------------------------------------------------------
-
 class CollectionSession:
     """``zvec.Collection`` 句柄的 context manager 封装。
 
@@ -118,9 +119,16 @@ class CollectionSession:
           Python GC 时机），但代码层不再持有 coll 引用，等于"逻辑关闭"。
     """
 
-    def __init__(self, name: str, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        name: str,
+        *,
+        read_only: bool = False,
+        schema: zvec.CollectionSchema | None = None,
+    ) -> None:
         self._name = name
         self._read_only = read_only
+        self._schema = schema
         self._coll: zvec.Collection | None = None
 
     @property
@@ -133,7 +141,9 @@ class CollectionSession:
 
     def __enter__(self) -> zvec.Collection:
         self._coll = open_or_create_collection(
-            self._name, read_only=self._read_only
+            self._name,
+            schema=self._schema,
+            read_only=self._read_only,
         )
         return self._coll
 
@@ -150,7 +160,6 @@ class CollectionSession:
 # 的关系：高层是 sugar，底层是核心。所有高层函数都先 ``with CollectionSession``
 # 拿句柄，然后调对应的低层函数。
 # ---------------------------------------------------------------------------
-
 def insert(collection: str, ddoc: DirectorDoc) -> None:
     """单条写入指定 collection。
 
@@ -178,7 +187,12 @@ def insert(collection: str, ddoc: DirectorDoc) -> None:
             ) from e
 
 
-def insert_many(collection: str, ddocs: Iterable[DirectorDoc]) -> dict:
+def insert_many(
+    collection: str,
+    ddocs: Iterable[DirectorDoc],
+    *,
+    schema: zvec.CollectionSchema | None = None,
+) -> dict:
     """批量写入指定 collection。
 
     行为：
@@ -190,6 +204,8 @@ def insert_many(collection: str, ddocs: Iterable[DirectorDoc]) -> dict:
     Args:
         collection: collection 名。
         ddocs: :class:`DirectorDoc` 列表（任意 Iterable）。
+        schema: 可选的 Profile 专属 CollectionSchema。传入时创建或打开集合会
+            按该 Schema 校验，避免不同 Profile 静默共用错误表结构。
 
     Returns:
         ``{"ok": int, "fail": int, "errors": list[(doc_id, str)]}``
@@ -200,7 +216,7 @@ def insert_many(collection: str, ddocs: Iterable[DirectorDoc]) -> dict:
     ok, fail, errors = 0, 0, []
     ddocs_list = list(ddocs)
 
-    with CollectionSession(collection) as coll:
+    with CollectionSession(collection, schema=schema) as coll:
         for ddoc in ddocs_list:
             try:
                 full = ddoc.to_zvec()
