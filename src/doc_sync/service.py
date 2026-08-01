@@ -83,6 +83,7 @@ class SourceExecution:
     state_entries: dict[str, SyncStateEntry]
     actions: list[JournalAction]
     errors: list[str]
+    identity_drifts: list[str]
     status: str
 
 
@@ -276,14 +277,18 @@ class DocumentSyncService:
                 if result.status_code in {404, 410}:
                     return ref, None, result.status_code, None
                 document = adapter.parse(ref, result)
-                if document.source_id != ref.source_id or document.document_id != ref.document_id:
-                    raise DocumentSyncError("Adapter parse 改变了 source_id/document_id 稳定身份")
+                if document.source_id != ref.source_id:
+                    raise DocumentSyncError("Adapter parse 改变了 source_id 稳定身份")
                 return ref, document, None, None
             except Exception as exc:  # noqa: BLE001
                 return ref, None, None, f"{type(exc).__name__}: {exc}"
 
         while pending and len(completed_ids) < maximum:
-            batch_ids = list(pending)[: min(batch_size, maximum - len(completed_ids))]
+            batch_ids = [
+                document_id for document_id in pending if document_id not in completed_ids
+            ][: min(batch_size, maximum - len(completed_ids))]
+            if not batch_ids:
+                break
             batch = [pending.pop(document_id) for document_id in batch_ids]
             results = await asyncio.gather(*(fetch_one(ref) for ref in batch))
             for ref, document, missing_status, error in results:
@@ -294,7 +299,28 @@ class DocumentSyncService:
                 if error is not None or document is None:
                     failed[ref.document_id] = (ref, error or "未知解析错误")
                     continue
-                parsed[ref.document_id] = (ref, document)
+                canonical_id = document.document_id
+                completed_ids.add(canonical_id)
+                # 同一批次可能同时包含重定向前后的引用；后续结果按稳定
+                # canonical document_id 合并，并优先保留已有路径提示。
+                pending.pop(canonical_id, None)
+                current = parsed.get(canonical_id)
+                if current is None:
+                    parsed[canonical_id] = (ref, document)
+                else:
+                    current_ref, _ = current
+                    current_score = (
+                        int(current_ref.document_id == canonical_id),
+                        int(current_ref.relative_path_hint is not None),
+                        len(Path(current_ref.relative_path_hint or "").parts),
+                    )
+                    candidate_score = (
+                        int(ref.document_id == canonical_id),
+                        int(ref.relative_path_hint is not None),
+                        len(Path(ref.relative_path_hint or "").parts),
+                    )
+                    if candidate_score > current_score:
+                        parsed[canonical_id] = (ref, document)
                 for discovered in adapter.discover_refs(document):
                     if discovered.source_id != adapter.source_id:
                         raise DocumentSyncError(
@@ -563,15 +589,32 @@ class DocumentSyncService:
         state_entries = dict(old_entries)
         actions: list[JournalAction] = []
         errors: list[str] = []
+        identity_drifts: list[str] = []
         claimed_paths = {entry.relative_path: entry.document_id for entry in old_entries.values()}
         for document_id, (ref, document) in sorted(parsed.items()):
             try:
+                if ref.document_id != document.document_id:
+                    identity_drifts.append(
+                        f"{source.id}/{ref.document_id} → {document.document_id}"
+                    )
+                old_state = old_entries.get(document_id)
+                if old_state is None:
+                    matching_entries = [
+                        entry
+                        for entry in old_entries.values()
+                        if entry.canonical_uri in {ref.canonical_uri, document.canonical_uri}
+                    ]
+                    if matching_entries:
+                        old_state = max(
+                            matching_entries,
+                            key=lambda entry: self._state_entry_priority(source, entry, None),
+                        )
                 manifest, next_state, action = self._decide_document(
                     source=source,
                     adapter=adapter,
                     ref=ref,
                     document=document,
-                    old_state=old_entries.get(document_id),
+                    old_state=old_state,
                     claimed_paths=claimed_paths,
                     run_id=run_id,
                 )
@@ -587,6 +630,14 @@ class DocumentSyncService:
                 )
                 errors.append(f"{source.id}/{document_id}: {exc}")
             else:
+                # 身份归一后删除同一 canonical URI 的旧别名，避免 state 再次
+                # 为同一来源建立两个 document_id。
+                for old_id, old_entry in list(state_entries.items()):
+                    if (
+                        old_id != document_id
+                        and old_entry.canonical_uri == next_state.canonical_uri
+                    ):
+                        state_entries.pop(old_id, None)
                 state_entries[document_id] = next_state
                 if action is not None:
                     actions.append(action)
@@ -629,6 +680,7 @@ class DocumentSyncService:
             state_entries=state_entries,
             actions=actions,
             errors=errors,
+            identity_drifts=identity_drifts,
             status=status,
         )
 
@@ -756,6 +808,7 @@ class DocumentSyncService:
                                 state_entries={},
                                 actions=[],
                                 errors=[run_errors[-1]],
+                                identity_drifts=[],
                                 status="failed",
                             )
                         )
@@ -780,10 +833,33 @@ class DocumentSyncService:
             large_change = bool(all_documents) and (
                 change_count / len(all_documents) >= self.config.policies.large_change.warning_ratio
             )
+            failed_count = sum(
+                document.operation == SyncOperation.FAILED for document in all_documents
+            )
+            source_failures = sum(execution.status == "failed" for execution in executions)
+            failure_ratio = (failed_count + source_failures) / max(
+                len(all_documents) + source_failures,
+                1,
+            )
+            apply_block_reasons: list[str] = []
+            if run_errors and not self.config.policies.apply_valid_changes_on_partial_run:
+                apply_block_reasons.append("运行存在错误且配置禁止部分应用")
+            if (
+                run_errors
+                and self.config.policies.partial_run.block_apply
+                and failure_ratio > self.config.policies.partial_run.max_failure_ratio
+            ):
+                apply_block_reasons.append(
+                    "失败比例 "
+                    f"{failure_ratio:.1%} 超过阈值 "
+                    f"{self.config.policies.partial_run.max_failure_ratio:.1%}"
+                )
+            if apply and apply_block_reasons:
+                run_errors.append("安全闸门阻止落盘：" + "；".join(apply_block_reasons))
             should_apply = (
                 apply
                 and not (large_change and self.config.policies.large_change.block_apply)
-                and (not run_errors or self.config.policies.apply_valid_changes_on_partial_run)
+                and not apply_block_reasons
             )
             updated_markdown: list[str] = []
             if should_apply:

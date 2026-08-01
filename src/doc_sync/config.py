@@ -75,6 +75,13 @@ class LargeChangePolicy(StrictConfigModel):
     block_apply: bool = False
 
 
+class PartialRunPolicy(StrictConfigModel):
+    """定义部分失败运行的安全落盘阈值。"""
+
+    max_failure_ratio: float = Field(default=0.25, ge=0, le=1)
+    block_apply: bool = True
+
+
 class PathCollisionPolicy(StrictConfigModel):
     """定义新文档目标路径冲突的处理方式。"""
 
@@ -89,6 +96,7 @@ class SyncPolicies(StrictConfigModel):
     apply_valid_changes_on_partial_run: bool = True
     redirects: RedirectPolicy = Field(default_factory=RedirectPolicy)
     large_change: LargeChangePolicy = Field(default_factory=LargeChangePolicy)
+    partial_run: PartialRunPolicy = Field(default_factory=PartialRunPolicy)
     path_collision: PathCollisionPolicy = Field(default_factory=PathCollisionPolicy)
 
 

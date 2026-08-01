@@ -253,20 +253,13 @@ browser:
 
 当正文依赖 JavaScript 时，渲染后的 HTML 才是解析输入。渲染缓存只用于排障和复现，不能替代 state，也不能直接当作最终 Markdown。
 
-浏览器启动、页面关闭或响应超时只影响当前文档：旧文件保留，manifest 记录 `failed`。当前 Hiascend Adapter 在一个 source 生命周期内复用 Playwright 浏览器和上下文、每页只新建并关闭 Page。生产 Cron 上线前仍必须用目标机器做容量测试；如果日志显示每页重新启动 Chrome，应视为生命周期回归，优先恢复进程/上下文复用并保留并发上限。
-
-实现边界要特别注意：`HttpDocumentSourceAdapter` 的默认 `fetch` 会调用共享
-`HttpFetchClient`，但当前 Hiascend 的动态浏览器 `fetch` 为满足 JavaScript 渲染而覆盖了
-该方法，实际只在 Adapter 内执行 allowlist、浏览器超时和页面生命周期控制，不自动获得
-HTTP 客户端的 robots、QPS、429/5xx 重试和响应大小闸门。生产环境若要求这些策略对浏览器
-请求同样生效，应在浏览器路径增加同等的限速/robots/重试封装，并在上线验收中单独验证；
-文档中的 HTTP 公共能力不能被理解为浏览器路径已经全部继承。
+浏览器启动、页面关闭或响应超时只影响当前文档：旧文件保留，manifest 记录 `failed`。当前 Hiascend Adapter 在一个 source 生命周期内复用 Playwright 浏览器和上下文、每页只新建并关闭 Page。浏览器连续收到 403/429/5xx 或正文等待超时后，会按配置退避，并切换共享 HTTP Client；HTTP 降级仍失败才标记当前页面失败。生产 Cron 上线前仍必须用目标机器做容量测试；如果日志显示每页重新启动 Chrome，应视为生命周期回归，优先恢复进程/上下文复用并保留并发上限。
 
 ### 5.5 阶段五：HTML 解析和 Markdown 规范化
 
 Hiascend Adapter 的解析顺序如下：
 
-1. 在 `selectors.article_body`（默认 `.the-article-body`）定位正文容器。
+1. 在 `selectors.article_body`（默认 `.the-article-body`）定位正文容器；多篇正文同屏时优先用外层 `data-item` 与当前 URL 的相对路径精确匹配。
 2. 按 `selectors.title`（默认 `h1`、`.topictitle1`）提取标题。
 3. 从页面、现有 Markdown 或稳定 URL 规则解析 `document_id` / `external_id`。
 4. 清理 `script`、`style`、无关导航、展开控件和重复页脚。

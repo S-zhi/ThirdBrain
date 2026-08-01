@@ -174,6 +174,9 @@ policies:
   large_change:
     warning_ratio: 0.10
     block_apply: false
+  partial_run:
+    max_failure_ratio: 0.25
+    block_apply: true
   path_collision:
     strategy: append_document_id
 ```
@@ -187,6 +190,8 @@ policies:
 | `redirects.allow_cross_host` | bool | `false` | 是否允许跨 Host；仍需通过 Adapter allowlist |
 | `large_change.warning_ratio` | number，0–1 | `0.10` | 变化比例达到阈值时写 `large_change=true` |
 | `large_change.block_apply` | bool | `false` | 是否因为大批量变化停止落盘 |
+| `partial_run.max_failure_ratio` | number，0–1 | `0.25` | 失败页面占比超过此值时触发安全闸门 |
+| `partial_run.block_apply` | bool | `true` | 高失败比例时是否禁止应用有效候选 |
 | `path_collision.strategy` | enum | `append_document_id` | 路径冲突时追加稳定文档 ID；也可设 `fail` |
 
 只有明确 HTTP 404/410 才累计 `missing_count`。目录中没有发现、超时、429 和 5xx
@@ -571,6 +576,10 @@ policies:
   large_change:
     block_apply: true
 ```
+
+部分运行还会统计 `failed / (discovered + source_failures)`。失败比例超过
+`partial_run.max_failure_ratio` 时，即使 `apply_valid_changes_on_partial_run=true`，
+也只生成 manifest/staging 而不写 Markdown，防止限流或解析回退制造错误副本。
 
 ### 连续 404
 

@@ -41,6 +41,11 @@ policies:
     warning_ratio: 0.10
     block_apply: false
 
+  # 失败比例过高时，即使允许部分运行，也不落盘，避免错误发现结果制造副本。
+  partial_run:
+    max_failure_ratio: 0.25
+    block_apply: true
+
   path_collision:
     strategy: append_document_id
 
@@ -81,7 +86,7 @@ sources:
         browser:
           channel: chrome
           headless: true
-          wait_until: domcontentloaded
+          wait_until: networkidle
           navigation_timeout_ms: 60000
           selector_timeout_ms: 60000
           retry_attempts: 2

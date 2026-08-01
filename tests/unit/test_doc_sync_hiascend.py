@@ -474,6 +474,36 @@ def test_hiascend_selects_matching_article_from_dynamic_html() -> None:
     assert article.h1.get_text(strip=True) == "asc_target"
 
 
+def test_hiascend_selects_by_data_item_when_titles_are_ambiguous() -> None:
+    """同名 API 的多个架构正文应按唯一 data-item 路径选择。"""
+    adapter = _adapter()
+    ref = DocumentRef(
+        source_id="hiascend-test",
+        document_id="context::cube_datamove::asc_copy_l0c2gm::asc_copy_l0c2gm_arch_2201",
+        canonical_uri=(
+            f"{BASE}context/cube_datamove/asc_copy_l0c2gm/"
+            "asc_copy_l0c2gm_arch_2201.md"
+        ),
+        title_hint="asc_copy_l0c2gm",
+    )
+    soup = BeautifulSoup(
+        """
+        <div class="waterfull-item" data-item="/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/context/cube_datamove/asc_copy_l0c2gm/asc_copy_l0c2gm_arch_3510.md">
+          <div class="the-article-body"><h1>asc_copy_l0c2gm</h1><p>3510</p></div>
+        </div>
+        <div class="waterfull-item" data-item="/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/context/cube_datamove/asc_copy_l0c2gm/asc_copy_l0c2gm_arch_2201.md">
+          <div class="the-article-body"><h1>asc_copy_l0c2gm</h1><p>2201</p></div>
+        </div>
+        """,
+        "html.parser",
+    )
+
+    article = adapter._select_article(soup, ref)
+
+    assert article.p is not None
+    assert article.p.get_text(strip=True) == "2201"
+
+
 def test_repository_hiascend_registry_covers_all_markdown() -> None:
     """当前 2249 份来源文档应全部建立唯一身份与 URI 注册。"""
     project_root = Path(__file__).resolve().parents[2]

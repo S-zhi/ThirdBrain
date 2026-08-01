@@ -18,8 +18,6 @@ from src.dao.emb import (
     SearchQuery,
     SearchResult,
     build_embedder,
-    search_dense,
-    search_exact_name,
 )
 from src.dao.mongo import (
     QueryDocumentSnapshot,
@@ -30,6 +28,7 @@ from src.dao.mongo import (
     QueryRecordFilters,
     QueryStrategy,
 )
+from src.rag import RagSchemaProfile, get_rag_profile
 
 logger = logging.getLogger(__name__)
 
@@ -173,10 +172,12 @@ class ZvecAgentQueryRetriever:
         self,
         collection_name: str,
         embedder_factory: Callable[[], Embedder] = build_embedder,
+        profile: RagSchemaProfile | None = None,
     ) -> None:
         """注入固定 collection 与按需创建的 embedder 工厂。"""
         self._collection_name = collection_name
         self._embedder_factory = embedder_factory
+        self._profile = profile or get_rag_profile()
 
     @staticmethod
     def _to_search_query(command: AgentQueryCommand) -> SearchQuery:
@@ -193,15 +194,17 @@ class ZvecAgentQueryRetriever:
     def query_name(self, command: AgentQueryCommand) -> list[SearchResult]:
         """打开只读 collection 并执行单路精确名称查询。"""
         with CollectionSession(self._collection_name, read_only=True) as collection:
-            return search_exact_name(collection, self._to_search_query(command))
+            return self._profile.search_exact(collection, self._to_search_query(command))
 
     def query_semantic(self, command: AgentQueryCommand) -> list[SearchResult]:
         """创建临时 embedder 并执行单路 dense 语义查询。"""
         embedder = self._embedder_factory()
         try:
             with CollectionSession(self._collection_name, read_only=True) as collection:
-                return search_dense(
-                    collection, self._to_search_query(command), embedder
+                return self._profile.search_similar(
+                    collection,
+                    self._to_search_query(command),
+                    embedder,
                 )
         finally:
             embedder.close()
@@ -377,18 +380,13 @@ class AgentQueryService:
         started = time.perf_counter()
         try:
             if command.query_type == AgentQueryType.NAME:
-                raw_results = await asyncio.to_thread(
-                    self._retriever.query_name, command
-                )
+                raw_results = await asyncio.to_thread(self._retriever.query_name, command)
                 include_score = False
             else:
-                raw_results = await asyncio.to_thread(
-                    self._retriever.query_semantic, command
-                )
+                raw_results = await asyncio.to_thread(self._retriever.query_semantic, command)
                 include_score = True
             documents = tuple(
-                _to_agent_document(result, include_score=include_score)
-                for result in raw_results
+                _to_agent_document(result, include_score=include_score) for result in raw_results
             )
         except Exception as error:
             finished_at = datetime.now(UTC)
@@ -487,9 +485,10 @@ def build_agent_query_service(
     record_dao: QueryRecordDAO,
     *,
     collection_name: str,
+    profile: RagSchemaProfile | None = None,
 ) -> AgentQueryService:
     """使用生产 Zvec 检索器和 Mongo DAO 组装查询 Service。"""
-    retriever = ZvecAgentQueryRetriever(collection_name)
+    retriever = ZvecAgentQueryRetriever(collection_name, profile=profile)
     return AgentQueryService(
         retriever,
         record_dao,
