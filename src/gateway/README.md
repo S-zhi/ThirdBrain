@@ -30,6 +30,10 @@ uv run uvicorn src.main:app --reload
 | --- | --- | --- |
 | `POST` | `/api/v1/agent/query/once` | 执行一次 API 文档查询 |
 | `POST` | `/api/v1/agent/query/batch` | 批量执行 API 文档查询，最多 100 项 |
+| `POST` | `/api/v1/admin/rag-construction/markdown/extract` | 通过受信任来源 Adapter 提取单页 Markdown |
+| `POST` | `/api/v1/admin/rag-construction/yaml/convert` | 将 Markdown 转为指定 RAG Profile 的 YAML |
+| `POST` | `/api/v1/admin/rag-construction/zvec/index` | 校验 YAML 并写入指定 Zvec store |
+| `POST` | `/api/v1/admin/rag-construction/pipeline/run` | 执行提取、转换、入库的完整流程 |
 
 两种接口都支持以下查询方式：
 
@@ -220,6 +224,108 @@ print(response.json())
 ```
 
 检索成功返回 `200`；查询记录写入失败不会阻断结果，响应中的 `record_status` 为 `failed`。
+
+## RAG 构建接口
+
+构建接口与查询接口分离：前者负责受控地把来源页面变成可检索的 Zvec 文档，后者只负责
+召回。四个接口调用同一个 `RagConstructionService`，因此单独调用和完整流程始终使用相同的
+Markdown Parser、YAML Mapper、Schema Profile 和 Zvec 映射。
+
+`/markdown/extract` 的 `source_id` 必须来自 `configs/document_sync.yaml` 中已启用的来源；URL
+仍会经过该 Adapter 的 allowlist、重定向和 robots 策略校验。接口不接受本地文件路径或任意
+collection 名。
+
+### 分阶段调用
+
+Markdown 提取：
+
+```json
+{
+  "source": {
+    "source_id": "hiascend-cann-910beta3",
+    "url": "https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/example.html"
+  }
+}
+```
+
+Markdown 转 YAML：
+
+```json
+{
+  "profile_id": "api-document-zvec/v2.1",
+  "markdown": "# CreateTensor\n\n创建张量。",
+  "source_name": "create_tensor.md",
+  "source_url": "https://docs.example.com/create_tensor",
+  "hints": {
+    "namespace": "com.example.api",
+    "version": "v1",
+    "language": "cpp"
+  }
+}
+```
+
+YAML 入库：
+
+```json
+{
+  "profile_id": "api-document-zvec/v2.1",
+  "store_alias": "schema21",
+  "yaml_content": "schema_version: '2.1'\ndocuments: []\n",
+  "source_name": "create_tensor.yaml",
+  "dry_run": false
+}
+```
+
+`dry_run: true` 会执行 YAML Schema、Profile 映射和目标表结构校验，但不会创建 Embedder 或
+写入 Zvec。一个批次中出现重复 `chunk_id` 时，会跳过该 ID 的全部记录，避免 upsert 顺序决定
+最终内容。
+
+### 完整流程
+
+```json
+{
+  "source": {
+    "source_id": "hiascend-cann-910beta3",
+    "url": "https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/example.html"
+  },
+  "profile_id": "api-document-zvec/v2.1",
+  "store_alias": "schema21",
+  "hints": {
+    "namespace": "com.example.api",
+    "version": "v1"
+  },
+  "options": {
+    "dry_run": false,
+    "include_intermediate_artifacts": true
+  }
+}
+```
+
+完整流程响应带有 `run_id` 与每个阶段的 `duration_ms`。若某阶段失败，错误响应会给出
+`failed_stage` 和 `completed_stages`，但不会泄露 Adapter、模型或向量后端的原始异常。
+
+### 动态选择向量库
+
+请求只传 `store_alias`。默认别名为：
+
+- `default`：`config.yaml` 中的 `zvec.default_collection`。
+- `schema21`：`config.yaml` 中的 `zvec.shadow_collection`。
+
+部署时可用独立环境变量扩展或覆盖别名，不需要变更全局 `ZvecConfig`：
+
+```ini
+RAG_CONSTRUCTION_ZVEC_STORES={"staging":"api_docs_staging","benchmark":"api_docs_benchmark"}
+```
+
+同一个 `profile_id` 每次请求都会按别名重新绑定 collection，所以同一 Schema 可用于生产、灰度
+和 Benchmark 等不同物理库。需要替换来源清单时设置：
+
+```ini
+RAG_CONSTRUCTION_DOCUMENT_SYNC_CONFIG=configs/document_sync.yaml
+```
+
+构建接口会自动注册为 FastAPI 应用的生命周期依赖；它与已有
+`/api/v1/admin/yaml-imports/batch` 不同，后者写 MongoDB 原始 YAML，前者写 Zvec 检索数据。
 
 ## Gateway 实现说明
 

@@ -15,9 +15,9 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-import yaml
 from config import get_config
 from src.dao.emb import DirectorDoc, Embedder, build_embedder, from_orm, insert_many
 
@@ -232,10 +232,12 @@ def project_v21_document(
         "schema_version": "2.1",
         "chunk_id": chunk_id,
         "name": name,
-        "namespace": namespace,
+        # Zvec 的精确检索强制以 namespace + version 过滤；因此 2.1 YAML 的
+        # 独立 ``version`` 字段必须投影回版本化 namespace，不能只用于 chunk_id。
+        "namespace": identity_namespace,
         "language": language,
         "category": category,
-        "title": f"{name} {namespace} {summary}".strip(),
+        "title": f"{name} {identity_namespace} {summary}".strip(),
         "description": description,
         "params_md": _render_parameter_markdown(input_parameters, output_parameters),
         "returns": json.dumps(output_parameters, ensure_ascii=False, sort_keys=True),
