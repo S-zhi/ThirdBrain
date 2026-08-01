@@ -5,11 +5,12 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.gateway.auth import ENV_KNOWLEDGE_API_KEY, require_service_auth
 from src.gateway.knowledge_query_router import router
 from src.knowledge import (
     ArtifactKind,
-    EvidenceRef,
     KnowledgeItem,
+    QueryEvidenceRef,
     ReaderSearchResult,
     RetrievalChannel,
     RetrievalHit,
@@ -26,12 +27,16 @@ class SourceReader:
         item = KnowledgeItem(
             id="AscendC.API.910beta3.Barrier",
             kind=ArtifactKind.SOURCE,
+            wiki_id=options.scope.wiki_id,
+            rag_collection_ids=options.scope.rag_collection_ids,
             namespace=options.scope.namespace,
             version=options.scope.version,
             title="Barrier",
             summary="数据同步 API",
             provenance=(
-                EvidenceRef(
+                QueryEvidenceRef(
+                    wiki_id=options.scope.wiki_id,
+                    rag_collection_id=options.scope.rag_collection_ids[0],
                     document_id="AscendC.API.910beta3.Barrier",
                     part_id="part-1",
                     content_hash="sha256:test",
@@ -50,7 +55,7 @@ class FailingReader:
         raise RuntimeError("backend detail")
 
 
-def _client() -> TestClient:
+def _client(*, bypass_auth: bool = True) -> TestClient:
     """构造只装配 Knowledge 路由的测试应用。"""
     app = FastAPI()
     app.state.knowledge_query_service = KnowledgeQueryService(
@@ -58,6 +63,8 @@ def _client() -> TestClient:
         EmptyKnowledgeReader(),
         EmptyRelationReader(),
     )
+    if bypass_auth:
+        app.dependency_overrides[require_service_auth] = lambda: None
     app.include_router(router)
     return TestClient(app)
 
@@ -70,6 +77,7 @@ def _failed_client() -> TestClient:
         FailingReader(),
         EmptyRelationReader(),
     )
+    app.dependency_overrides[require_service_auth] = lambda: None
     app.include_router(router)
     return TestClient(app)
 
@@ -77,6 +85,8 @@ def _failed_client() -> TestClient:
 def _payload() -> dict[str, object]:
     return {
         "query": "Barrier",
+        "wiki_id": "wiki:test",
+        "rag_collection_ids": ["rag:test"],
         "namespace": "AscendC.API.910beta3",
         "version": "910beta3",
         "budget": "micro",
@@ -115,3 +125,32 @@ def test_gateway_maps_total_reader_failure_to_503() -> None:
         "code": "KNOWLEDGE_READER_UNAVAILABLE",
         "message": "原始文档和派生知识检索均不可用",
     }
+
+
+def test_gateway_is_closed_when_auth_is_not_configured(monkeypatch) -> None:
+    """没有服务密钥时接口必须安全关闭。"""
+    monkeypatch.delenv(ENV_KNOWLEDGE_API_KEY, raising=False)
+
+    response = _client(bypass_auth=False).post("/api/v1/knowledge/query", json=_payload())
+
+    assert response.status_code == 503
+
+
+def test_gateway_requires_valid_service_key(monkeypatch) -> None:
+    """错误密钥被拒绝，正确 Bearer 密钥可以查询。"""
+    monkeypatch.setenv(ENV_KNOWLEDGE_API_KEY, "test-secret")
+    client = _client(bypass_auth=False)
+
+    rejected = client.post(
+        "/api/v1/knowledge/query",
+        json=_payload(),
+        headers={"Authorization": "Bearer wrong"},
+    )
+    accepted = client.post(
+        "/api/v1/knowledge/query",
+        json=_payload(),
+        headers={"Authorization": "Bearer test-secret"},
+    )
+
+    assert rejected.status_code == 401
+    assert accepted.status_code == 200

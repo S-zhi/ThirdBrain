@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from src.knowledge.contracts import (
-    ArtifactStatus,
-    Confidence,
-    EvidenceRef,
+from src.knowledge.models import ArtifactStatus, Confidence
+from src.knowledge.query_contracts import (
     KnowledgeItem,
+    MatchConfidence,
+    QueryEvidenceRef,
     RankedKnowledgeItem,
     RelationRef,
     RetrievalChannel,
@@ -32,12 +32,14 @@ _CONFIDENCE_BOOSTS: dict[Confidence, float] = {
 }
 
 
-def _unique_evidence(values: list[EvidenceRef]) -> tuple[EvidenceRef, ...]:
+def _unique_evidence(values: list[QueryEvidenceRef]) -> tuple[QueryEvidenceRef, ...]:
     """按稳定来源定位字段去重 EvidenceRef。"""
     seen: set[tuple[object, ...]] = set()
-    result: list[EvidenceRef] = []
+    result: list[QueryEvidenceRef] = []
     for value in values:
         key = (
+            value.wiki_id,
+            value.rag_collection_id,
             value.document_id,
             value.part_id,
             value.content_hash,
@@ -55,12 +57,13 @@ def _unique_evidence(values: list[EvidenceRef]) -> tuple[EvidenceRef, ...]:
 
 def _unique_relations(values: list[RelationRef]) -> tuple[RelationRef, ...]:
     """按关系类型和目标身份去重关系。"""
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     result: list[RelationRef] = []
     for value in values:
         key = (
             value.relation.value,
             value.target_id,
+            value.target_wiki_id,
             value.target_namespace,
             value.target_version,
         )
@@ -73,16 +76,17 @@ def _unique_relations(values: list[RelationRef]) -> tuple[RelationRef, ...]:
 
 def fuse_hits(hits: list[RetrievalHit], *, top_k: int) -> tuple[RankedKnowledgeItem, ...]:
     """用 RRF、明确信号加成和稳定 tie-breaker 融合多路候选。"""
-    ranks_by_channel: dict[RetrievalChannel, int] = defaultdict(int)
+    ranks_by_ranking: dict[str, int] = defaultdict(int)
     scores: dict[tuple[str, str], float] = defaultdict(float)
     items: dict[tuple[str, str], KnowledgeItem] = {}
     signals: dict[tuple[str, str], set[str]] = defaultdict(set)
-    evidence: dict[tuple[str, str], list[EvidenceRef]] = defaultdict(list)
+    evidence: dict[tuple[str, str], list[QueryEvidenceRef]] = defaultdict(list)
     relations: dict[tuple[str, str], list[RelationRef]] = defaultdict(list)
 
     for hit in hits:
-        ranks_by_channel[hit.channel] += 1
-        rank = ranks_by_channel[hit.channel]
+        ranking = hit.ranking or hit.channel.value
+        ranks_by_ranking[ranking] += 1
+        rank = ranks_by_ranking[ranking]
         key = (hit.item.kind.value, hit.item.id)
         if key not in items:
             items[key] = hit.item
@@ -99,13 +103,24 @@ def fuse_hits(hits: list[RetrievalHit], *, top_k: int) -> tuple[RankedKnowledgeI
 
     ranked: list[RankedKnowledgeItem] = []
     for key, item in items.items():
+        item_signals = signals[key]
+        if (
+            RetrievalChannel.EXACT.value in item_signals
+            or RetrievalChannel.ALIAS.value in item_signals
+        ):
+            match_confidence = MatchConfidence.STRONG
+        elif len(item_signals) >= 2:
+            match_confidence = MatchConfidence.MODERATE
+        else:
+            match_confidence = MatchConfidence.WEAK
         ranked.append(
             RankedKnowledgeItem(
                 **item.model_dump(exclude={"provenance", "relationships"}),
                 provenance=_unique_evidence(evidence[key]),
                 relationships=_unique_relations(relations[key]),
                 score=round(scores[key], 8),
-                rank_signals=tuple(sorted(signals[key])),
+                match_confidence=match_confidence,
+                rank_signals=tuple(sorted(item_signals)),
             )
         )
     ranked.sort(

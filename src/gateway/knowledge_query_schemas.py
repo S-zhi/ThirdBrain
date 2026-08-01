@@ -21,6 +21,8 @@ class KnowledgeQueryRequest(KnowledgeGatewayModel):
     """一次带强制 namespace/version 的上层知识查询。"""
 
     query: NonEmptyString
+    wiki_id: NonEmptyString
+    rag_collection_ids: tuple[NonEmptyString, ...] = Field(min_length=1)
     namespace: NonEmptyString
     version: NonEmptyString
     language: NonEmptyString | None = None

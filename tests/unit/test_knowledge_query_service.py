@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from src.knowledge import (
     ArtifactKind,
     ArtifactStatus,
     Confidence,
-    EvidenceRef,
     KnowledgeItem,
     QueryBudget,
+    QueryEvidenceRef,
     QueryKnowledgeOptions,
     QueryScope,
     ReaderSearchResult,
@@ -62,6 +66,8 @@ def _options(
 ) -> QueryKnowledgeOptions:
     return QueryKnowledgeOptions(
         scope=QueryScope(
+            wiki_id="wiki:test",
+            rag_collection_ids=("rag:test",),
             namespace="AscendC.API.910beta3",
             version="910beta3",
             language="cpp",
@@ -84,7 +90,9 @@ def _item(
     provenance = ()
     if with_provenance:
         provenance = (
-            EvidenceRef(
+            QueryEvidenceRef(
+                wiki_id="wiki:test",
+                rag_collection_id="rag:test",
                 document_id=document_id or item_id,
                 part_id=f"{document_id or item_id}:part-1",
                 content_hash="sha256:test",
@@ -94,6 +102,8 @@ def _item(
     return KnowledgeItem(
         id=item_id,
         kind=kind,
+        wiki_id="wiki:test",
+        rag_collection_ids=("rag:test",),
         namespace=namespace,
         version="910beta3",
         title=item_id,
@@ -248,7 +258,7 @@ async def test_micro_budget_returns_capsule_and_stable_ranking() -> None:
     second = await service.query_knowledge("cache", _options(budget=QueryBudget.MICRO))
 
     assert first.recall_capsule.count == 3
-    assert first.budget_report["recall_capsule"].truncated
+    assert first.budget_report["context_packet"].truncated
     assert [item.id for item in first.source_hits] == [item.id for item in second.source_hits]
     assert [item.score for item in first.source_hits] == [item.score for item in second.source_hits]
     assert [stage.name for stage in first.trace] == [
@@ -275,3 +285,121 @@ async def test_graph_expansion_is_bounded_and_participates_in_ranking() -> None:
 
     assert graph.seed_ids == ("api:primary",)
     assert [item.id for item in result.knowledge_hits] == ["concept:related"]
+
+
+async def test_artifact_outside_top_k_still_satisfies_source_cache() -> None:
+    """展示层 top-k 不能把已经存在的 Artifact 误判为缓存缺失。"""
+    source = _item("api:barrier", kind=ArtifactKind.SOURCE)
+    concept = _item(
+        "concept:barrier",
+        kind=ArtifactKind.CONCEPT,
+        document_id="api:barrier",
+    )
+    service = KnowledgeQueryService(
+        StaticReader(_hit(source, RetrievalChannel.EXACT)),
+        StaticReader(_hit(concept, RetrievalChannel.LEXICAL)),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge("barrier", _options(top_k=1))
+
+    assert result.knowledge_hits == ()
+    assert result.cache_misses == ()
+    assert result.enrichment_requests == ()
+    assert result.budget_report["knowledge_artifacts"].available == 1
+    assert result.budget_report["knowledge_artifacts"].truncated
+
+
+async def test_weak_dense_only_result_recommends_abstention() -> None:
+    """单路弱语义命中只能作为提示，不能被包装成可靠答案。"""
+    source = _item("api:weak", kind=ArtifactKind.SOURCE)
+    service = KnowledgeQueryService(
+        StaticReader(_hit(source, RetrievalChannel.DENSE, score=0.01)),
+        StaticReader(),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge("unrelated question", _options())
+
+    assert result.found
+    assert result.source_hits[0].match_confidence == "weak"
+    assert result.abstention.recommended
+    assert "WEAK_MATCHES_ONLY" in result.warnings
+
+
+async def test_cross_collection_provenance_is_removed_before_return() -> None:
+    """Item 本身在 scope 内也不能携带其他 Collection 的证据。"""
+    item = _item("concept:scoped", kind=ArtifactKind.CONCEPT)
+    foreign = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:foreign",
+        document_id="foreign",
+        part_id="part-foreign",
+        content_hash="sha256:foreign",
+        version="910beta3",
+    )
+    item = item.model_copy(update={"provenance": (*item.provenance, foreign)})
+    service = KnowledgeQueryService(
+        StaticReader(),
+        StaticReader(_hit(item, RetrievalChannel.EXACT)),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge("scoped", _options())
+
+    assert len(result.knowledge_hits[0].provenance) == 1
+    assert result.knowledge_hits[0].provenance[0].rag_collection_id == "rag:test"
+    assert "OUT_OF_SCOPE_PROVENANCE_DROPPED" in result.warnings
+
+
+async def test_micro_packet_never_exceeds_hard_character_budget() -> None:
+    """首个候选很大时也必须遵守整包字符预算。"""
+    item = _item("concept:large", kind=ArtifactKind.CONCEPT)
+    evidence = tuple(
+        QueryEvidenceRef(
+            wiki_id="wiki:test",
+            rag_collection_id="rag:test",
+            document_id=f"document-{index}",
+            part_id=f"part-{index}",
+            content_hash="sha256:test",
+            path="x" * 4000,
+            version="910beta3",
+        )
+        for index in range(20)
+    )
+    item = item.model_copy(
+        update={
+            "summary": "大" * 10000,
+            "provenance": evidence,
+        }
+    )
+    service = KnowledgeQueryService(
+        StaticReader(),
+        StaticReader(_hit(item, RetrievalChannel.EXACT)),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge(
+        "large",
+        _options(budget=QueryBudget.MICRO),
+    )
+
+    assert result.recall_capsule.estimated_chars <= 1800
+
+
+async def test_reader_cancellation_is_not_swallowed_as_degradation() -> None:
+    """请求取消必须向上传播，不能伪装成 Reader unavailable。"""
+
+    class CancelledReader:
+        async def search(self, query, options, *, limit):
+            del query, options, limit
+            raise asyncio.CancelledError
+
+    service = KnowledgeQueryService(
+        CancelledReader(),
+        StaticReader(),
+        EmptyRelationReader(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.query_knowledge("cancel", _options())

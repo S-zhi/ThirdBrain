@@ -7,6 +7,7 @@ from typing import Annotated, cast
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from src.gateway.auth import require_service_auth
 from src.gateway.knowledge_query_schemas import (
     KnowledgeGatewayError,
     KnowledgeQueryRequest,
@@ -15,7 +16,11 @@ from src.knowledge import QueryKnowledgeOptions, QueryKnowledgeResult, QueryScop
 from src.knowledge.query_service import KnowledgeQueryService
 from src.knowledge.readers import KnowledgeReaderError
 
-router = APIRouter(prefix="/api/v1/knowledge", tags=["Knowledge Wiki 查询"])
+router = APIRouter(
+    prefix="/api/v1/knowledge",
+    tags=["Knowledge Wiki 查询"],
+    dependencies=[Depends(require_service_auth)],
+)
 
 
 def get_knowledge_query_service(request: Request) -> KnowledgeQueryService:
@@ -47,6 +52,8 @@ async def query_knowledge(
     """执行只读查询；缓存缺失仅随响应返回，不触发知识写入。"""
     options = QueryKnowledgeOptions(
         scope=QueryScope(
+            wiki_id=payload.wiki_id,
+            rag_collection_ids=payload.rag_collection_ids,
             namespace=payload.namespace,
             version=payload.version,
             language=payload.language,
