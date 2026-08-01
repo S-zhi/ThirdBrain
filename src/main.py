@@ -7,7 +7,14 @@ from fastapi import FastAPI
 
 from config import get_config
 from src.dao.mongo import MongoBootstrap, MongoDatabase, QueryRecordDAO, YamlDocumentDAO
-from src.gateway import gateway_router, rag_construction_router, yaml_import_router
+from src.gateway import (
+    gateway_router,
+    knowledge_query_router,
+    rag_construction_router,
+    yaml_import_router,
+)
+from src.knowledge.mongo_repository import MongoKnowledgeRepository
+from src.knowledge.query_service import build_knowledge_query_service
 from src.service import (
     YamlImportService,
     build_agent_query_service,
@@ -29,6 +36,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             QueryRecordDAO(mongo),
             collection_name=collection_name,
         )
+        app.state.knowledge_query_service = build_knowledge_query_service(
+            collection_name,
+            MongoKnowledgeRepository(mongo),
+        )
         app.state.rag_construction_service = build_rag_construction_service()
         yield
     finally:
@@ -42,5 +53,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(gateway_router)
+app.include_router(knowledge_query_router)
 app.include_router(yaml_import_router)
 app.include_router(rag_construction_router)
