@@ -699,6 +699,92 @@ def _enabled_nodes(config: MarkdownToYamlConfig) -> dict[str, dict[str, Any]]:
     }
 
 
+_SLOT_PATHS: tuple[str, ...] = (
+    "documents[].name",
+    "documents[].use.summary",
+    "documents[].use.category",
+    "documents[].use.description",
+    "documents[].use.product_support",
+    "documents[].use.prerequisites",
+    "documents[].use.function_details.input_parameters",
+    "documents[].use.function_details.output_parameters",
+    "documents[].use.function_details.signature",
+    "documents[].use.data_structure.fields",
+    "documents[].use.examples",
+)
+
+
+def _has_empty_slot_for_node(document: Mapping[str, Any], node_path: str) -> bool:
+    """检查当前文档中对应 node_path 的目标字段是否还有空槽位。"""
+    for document_item in document.get("documents", []):
+        if not isinstance(document_item, Mapping):
+            continue
+        use = document_item.get("use")
+        if not isinstance(use, Mapping):
+            continue
+        if node_path == "documents[].name":
+            if _is_value_empty(document_item.get("name")):
+                return True
+        elif node_path == "documents[].use.summary":
+            if _is_value_empty(use.get("summary")):
+                return True
+        elif node_path == "documents[].use.category":
+            if _is_value_empty(use.get("category")):
+                return True
+        elif node_path == "documents[].use.description":
+            if _is_value_empty(use.get("description")):
+                return True
+        elif node_path == "documents[].use.product_support":
+            if _is_collection_empty(use.get("product_support")):
+                return True
+        elif node_path == "documents[].use.prerequisites":
+            if _is_collection_empty(use.get("prerequisites")):
+                return True
+        elif node_path == "documents[].use.examples":
+            if _is_collection_empty(use.get("examples")):
+                return True
+        elif node_path in {
+            "documents[].use.function_details.input_parameters",
+            "documents[].use.function_details.output_parameters",
+        }:
+            function_details = use.get("function_details", {})
+            if not isinstance(function_details, Mapping):
+                continue
+            list_key = node_path.rsplit(".", 1)[-1]
+            if _is_collection_empty(function_details.get(list_key)):
+                return True
+        elif node_path == "documents[].use.function_details.signature":
+            function_details = use.get("function_details", {})
+            if isinstance(function_details, Mapping) and _is_value_empty(
+                function_details.get("signature")
+            ):
+                return True
+        elif node_path == "documents[].use.data_structure.fields":
+            data_structure = use.get("data_structure", {})
+            if isinstance(data_structure, Mapping) and _is_collection_empty(
+                data_structure.get("fields")
+            ):
+                return True
+    return False
+
+
+def _filter_enabled_nodes_for_empty_slots(
+    document: Mapping[str, Any],
+    config: MarkdownToYamlConfig,
+) -> dict[str, dict[str, Any]]:
+    """只保留当前文档中仍存在空槽位、且 config 中 enabled=true 的节点。
+
+    这是"AI 只填空值"的硬约束：构造提示词时，绝不把已填充的字段再次开放给 AI，
+    调用方据此判断当前文档是否需要发起一次 AI 请求。
+    """
+    filtered: dict[str, dict[str, Any]] = {}
+    for path, payload in _enabled_nodes(config).items():
+        if path in _SLOT_PATHS and not _has_empty_slot_for_node(document, path):
+            continue
+        filtered[path] = payload
+    return filtered
+
+
 def _read_prompt_template(prompt_file: str, project_root: Path) -> str:
     """读取外置提示词；相对路径统一相对于项目根目录解析。"""
     prompt_path = Path(prompt_file)
@@ -815,7 +901,8 @@ def merge_image_updates(
             node_path = f"resources[].raw.{field}"
             if _node(config, node_path) is None:
                 continue
-            if _extract_text(raw.get(field)) or field not in update:
+            # 硬约束：图片 alt/title 已非空时禁止 AI 覆盖
+            if not _is_value_empty(raw.get(field)) or field not in update:
                 continue
             value = _unescape_markdown_text(_extract_text(update[field]))
             if value:
@@ -848,7 +935,7 @@ def build_ai_prompt(
         "resources": list(evidence.get("resources") or []),
     }
     payload = {
-        "enabled_nodes": _enabled_nodes(config),
+        "enabled_nodes": _filter_enabled_nodes_for_empty_slots(document, config),
         "current_documents": document["documents"],
         "preprocess_markdown": document["source"]["preprocess_markdown"],
         "slot_evidence": evidence_copy,
@@ -896,6 +983,29 @@ def _extract_text(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
 
+def _is_value_empty(value: Any) -> bool:
+    """判断 value/is_ai 包装或裸标量是否为空。
+
+    空定义为 None、纯空白字符串，或 value/is_ai 包装中 value 为上述空值。
+    """
+    if isinstance(value, Mapping):
+        return _is_value_empty(value.get("value"))
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _is_collection_empty(value: Any) -> bool:
+    """判断 list 字段是否为空；None 或非列表也视为空。"""
+    if value is None:
+        return True
+    if isinstance(value, list):
+        return len(value) == 0
+    return True
+
+
 def _trim_text(value: str, max_chars: int | None) -> str:
     """在句子边界内把文本限制到配置长度。"""
     if max_chars is None or len(value) <= max_chars:
@@ -939,6 +1049,9 @@ def _merge_text(
     """把一个 AI 文本槽位安全合并到 value/is_ai 包装。"""
     if node is None or update_key not in update:
         return
+    # 硬约束：目标值非空时禁止 AI 覆盖，无论 is_ai 是 true 还是 false
+    if not _is_value_empty(target.get(key)):
+        return
     accepted = _accept_value(_extract_text(update[update_key]), node, markdown)
     if accepted:
         value, is_ai = accepted
@@ -954,6 +1067,9 @@ def _merge_product_support(
     """合并具有原文产品证据的支持矩阵。"""
     values = update.get("product_support")
     if node is None or not isinstance(values, list):
+        return
+    # 硬约束：列表已非空时禁止 AI 整体替换
+    if not _is_collection_empty(use.get("product_support")):
         return
     output: list[dict[str, Any]] = []
     for item in values:
@@ -983,6 +1099,9 @@ def _merge_text_list(
     values = update.get(update_key)
     if node is None or not isinstance(values, list):
         return
+    # 硬约束：列表已非空时禁止 AI 整体替换
+    if not _is_collection_empty(use.get(target_key)):
+        return
     output: list[dict[str, Any]] = []
     for item in values:
         accepted = _accept_value(_extract_text(item), node, markdown)
@@ -1004,6 +1123,9 @@ def _merge_named_items(
     """合并参数或数据结构字段列表。"""
     values = update.get(update_key)
     if node is None or not isinstance(values, list):
+        return
+    # 硬约束：列表已非空时禁止 AI 整体替换
+    if not _is_collection_empty(target.get(target_key)):
         return
     output: list[dict[str, Any]] = []
     for item in values:
@@ -1078,7 +1200,7 @@ def merge_ai_updates(
             continue
         target_document = document["documents"][index]
         name_node = _node(config, "documents[].name")
-        if name_node and "name" in update:
+        if name_node and "name" in update and _is_value_empty(target_document.get("name")):
             accepted = _accept_value(_extract_text(update["name"]), name_node, markdown)
             if accepted:
                 target_document["name"] = accepted[0]
@@ -1378,7 +1500,10 @@ def run_pipeline(
     )
     prompt: str | None = None
     response: str | None = None
-    if config.ai.enabled and _enabled_nodes(config):
+    active_text_nodes = (
+        _filter_enabled_nodes_for_empty_slots(document, config) if config.ai.enabled else {}
+    )
+    if config.ai.enabled and active_text_nodes:
         if not config.ai.single_pass:
             raise ValueError("Schema 2.1 Pipeline 当前只允许 single_pass: true")
         if ai_call is None:
