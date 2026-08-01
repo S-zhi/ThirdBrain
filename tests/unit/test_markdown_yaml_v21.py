@@ -20,7 +20,7 @@ def test_preprocess_unescapes_markdown_text_but_preserves_code() -> None:
     """正文和表格证据应去除标点转义，代码内容应原样保留。"""
     markdown = """# example
 
-支持 int16\\_t、PIPE\\_V 和 16\\*16。
+支持 int16\\_t、PIPE\\_V 和 16\\*16，代码标识为 `escaped\\_name`。
 
 |参数|类型|
 |---|---|
@@ -36,9 +36,49 @@ const char* pattern = "\\\\*";
     assert "int16_t" in preprocess
     assert "PIPE_V" in preprocess
     assert "16*16" in preprocess
-    assert "\\_" not in preprocess
+    assert "`escaped\\_name`" in preprocess
+    assert "|src|int16_t|" in preprocess
+    assert 'const char* pattern = "\\\\*";' in preprocess
     assert evidence["tables"][0]["rows"][0][1] == "int16_t"
     assert evidence["code_blocks"][0]["content"] == 'const char* pattern = "\\\\*";'
+
+
+def test_preprocess_preserves_semantic_blocks_and_link_anchors() -> None:
+    """表格、代码和链接锚文本必须保留，链接地址必须删除。"""
+    markdown = """# asc_get_ffts_base_addr
+
+| 产品 | 是否支持 |
+| --- | --- |
+| Atlas A3 | √ |
+
+```cpp
+int64_t asc_get_ffts_base_addr();
+```
+
+调用 [asc_set_ffts_base_addr](https://example.com/asc_set_ffts_base_addr.md) 后使用。
+
+另见 [系统变量][sys-var]，裸链接 <https://example.com/bare>。
+
+[sys-var]: https://example.com/system-variable
+"""
+
+    preprocess, _ = preprocess_markdown(markdown, load_config().markdown_to_yaml)
+
+    assert "| Atlas A3 | √ |" in preprocess
+    assert "int64_t asc_get_ffts_base_addr();" in preprocess
+    assert "asc_set_ffts_base_addr" in preprocess
+    assert "另见 系统变量，裸链接 。" in preprocess
+    assert "https://example.com" not in preprocess
+    assert "调用 asc_set_ffts_base_addr 后使用。" in preprocess
+
+
+def test_preprocess_preserves_html_tables_in_lossless_mode() -> None:
+    """关闭表格删除后，HTML 表格也必须留在派生正文中。"""
+    markdown = "# example\n\n<table><tr><td>real</td></tr></table>\n"
+
+    preprocess, _ = preprocess_markdown(markdown, load_config().markdown_to_yaml)
+
+    assert "<table><tr><td>real</td></tr></table>" in preprocess
 
 
 def test_preprocess_preserves_required_latex_backslashes() -> None:

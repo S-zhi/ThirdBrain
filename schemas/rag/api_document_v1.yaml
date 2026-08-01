@@ -1,0 +1,43 @@
+# 这是 Profile 的可解释数据契约，不负责动态加载 Python 类。
+# components 仅用于审计和诊断；真正装配入口见 build_api_document_profile()。
+profile:
+  id: api-document-zvec/v1
+  source_schema_versions: ["1.0", "2.0", "2.1"]
+  description: 当前 API 文档映射到 Zvec 17 标量字段与 dense+sparse 双向量的完整能力包。
+
+components:
+  markdown_to_yaml: src.rag.api_document_profile.ApiDocumentMarkdownToYamlParser
+  yaml_to_zvec: src.rag.api_document_profile.ApiDocumentYamlToZvecMapper
+  exact_retriever: src.rag.api_document_profile.ApiDocumentExactRetriever
+  similarity_retriever: src.rag.api_document_profile.ApiDocumentSimilarityRetriever
+
+collection:
+  # indexed=true 表示必须存在 Zvec scalar 倒排索引。检索前会严格核对字段集合，
+  # 因此这里增删字段时必须同步修改 get_collection_schema() 和 yaml2zvec mapper。
+  fields:
+    - {name: namespace, type: STRING, indexed: true, source: namespace}
+    - {name: api_id, type: STRING, indexed: true, source: chunk_id}
+    - {name: name, type: STRING, indexed: true, source: name}
+    - {name: version, type: STRING, indexed: true, source: namespace 最后一段}
+    - {name: kind, type: STRING, indexed: true, source: category}
+    - {name: language, type: STRING, indexed: true, source: language}
+    - {name: version_support, type: ARRAY_STRING, indexed: true, source: product_support}
+    - {name: deprecated, type: BOOL, indexed: true, source: deprecated}
+    - {name: ingested_at, type: INT64, indexed: true, source: ingested_at}
+    - {name: api_name, type: STRING, indexed: false, source: title}
+    - {name: description, type: STRING, indexed: false, source: description}
+    - {name: signature, type: STRING, indexed: false, source: signature}
+    - {name: parameters_md, type: STRING, indexed: false, source: params_md}
+    - {name: returns_json, type: STRING, indexed: false, source: returns}
+    - {name: examples, type: ARRAY_STRING, indexed: false, source: examples}
+    - {name: source_markdown, type: STRING, indexed: false, source: body_md}
+    - {name: deprecation_note, type: STRING, indexed: false, source: deprecation_note}
+  vectors:
+    # dense 维度随当前 Embedder 配置解析；sparse 使用 Zvec 的动态维度 0。
+    - {name: dense_embedding, type: VECTOR_FP32, dimension_from: embedder.dimension, metric: COSINE, source: description + api_name + name}
+    - {name: sparse_embedding, type: SPARSE_VECTOR_FP32, dimension: 0, metric: IP, source: api_id + signature + name}
+
+retrieval:
+  # required_filters 是 Version-first / Namespace isolation 的不可省略查询范围。
+  exact: {identity_fields: [name, api_id], required_filters: [namespace, version]}
+  similarity: {vector_field: dense_embedding, required_filters: [namespace, version]}

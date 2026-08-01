@@ -36,14 +36,14 @@ markdown_to_yaml:
     language: cpp
 
   preprocess:
-    # 删除前会先提取资源、参数表、函数原型和示例，避免有效信息丢失。
+    # 表格和代码块保留在正文中；链接与图片提取为 resources 后从正文删除。
     # 图片相对路径统一相对于站点根目录补全，不跟随当前文档页面目录。
     image_base_url: https://www.hiascend.com/
     remove_footer: true
     remove_links: true
     remove_images: true
-    remove_code_blocks: true
-    remove_tables: true
+    remove_code_blocks: false
+    remove_tables: false
     remove_invalid_values:
       - "[object Object]"
       - "undefined"

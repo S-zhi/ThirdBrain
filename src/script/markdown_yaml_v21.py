@@ -451,7 +451,7 @@ def find_unparsed_markdown_images(markdown: str) -> list[dict[str, Any]]:
 
 
 def _remove_resource_markup(text: str, remove_images: bool, remove_links: bool) -> str:
-    """从主正文删除已提取的图片和链接节点。"""
+    """删除已提取的图片与链接地址，同时保留链接锚文本。"""
     cleaned = text
     if remove_images:
         cleaned = INLINE_IMAGE_PATTERN.sub("", cleaned)
@@ -459,11 +459,44 @@ def _remove_resource_markup(text: str, remove_images: bool, remove_links: bool) 
         cleaned = HTML_IMAGE_PATTERN.sub("", cleaned)
         cleaned = BARE_IMAGE_PATTERN.sub("", cleaned)
     if remove_links:
-        cleaned = INLINE_LINK_PATTERN.sub("", cleaned)
-        cleaned = REFERENCE_LINK_PATTERN.sub("", cleaned)
+        cleaned = INLINE_LINK_PATTERN.sub(lambda match: match.group("anchor"), cleaned)
+        cleaned = REFERENCE_LINK_PATTERN.sub(lambda match: match.group("anchor"), cleaned)
         cleaned = AUTOLINK_PATTERN.sub("", cleaned)
         cleaned = REFERENCE_DEFINITION_PATTERN.sub("", cleaned)
     return cleaned
+
+
+def _unescape_prose_preserving_code(markdown: str) -> str:
+    """规范化普通 Markdown 文本，但不改写围栏、缩进或行内代码。"""
+    _, _, fenced_code_lines, _ = _scan_blocks(markdown)
+    lines = markdown.splitlines(keepends=True)
+    chunks: list[str] = []
+    prose: list[str] = []
+
+    def unescape_prose_chunk(text: str) -> str:
+        result: list[str] = []
+        cursor = 0
+        for match in re.finditer(r"(`+)[^\n]*?\1", text):
+            result.append(_unescape_markdown_text(text[cursor : match.start()]))
+            result.append(match.group(0))
+            cursor = match.end()
+        result.append(_unescape_markdown_text(text[cursor:]))
+        return "".join(result)
+
+    def flush_prose() -> None:
+        if prose:
+            chunks.append(unescape_prose_chunk("".join(prose)))
+            prose.clear()
+
+    for index, line in enumerate(lines):
+        is_code = index in fenced_code_lines or bool(re.match(r"^(?: {4}|\t)\S", line))
+        if is_code:
+            flush_prose()
+            chunks.append(line)
+        else:
+            prose.append(line)
+    flush_prose()
+    return "".join(chunks)
 
 
 def _remove_empty_headings(lines: list[str]) -> list[str]:
@@ -509,7 +542,8 @@ def preprocess_markdown(
         cleaned_lines.append(line)
 
     cleaned = "\n".join(cleaned_lines)
-    cleaned = re.sub(r"<table\b.*?</table>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if config.preprocess.remove_tables:
+        cleaned = re.sub(r"<table\b.*?</table>", "", cleaned, flags=re.IGNORECASE | re.DOTALL)
     cleaned = _remove_resource_markup(
         cleaned,
         config.preprocess.remove_images,
@@ -522,7 +556,7 @@ def preprocess_markdown(
             cleaned,
             flags=re.IGNORECASE,
         )
-    cleaned = _unescape_markdown_text(cleaned)
+    cleaned = _unescape_prose_preserving_code(cleaned)
     cleaned_lines = _remove_empty_headings(cleaned.splitlines())
     cleaned = "\n".join(cleaned_lines)
     cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)

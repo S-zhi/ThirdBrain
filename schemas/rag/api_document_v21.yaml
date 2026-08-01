@@ -1,0 +1,40 @@
+# Schema 2.1 专用能力包。该 Profile 只接受顶层 schema_version: "2.1"。
+# 它与 v1 共用当前 Zvec physical schema；独立文件用于锁定来源版本和后续演进边界。
+profile:
+  id: api-document-zvec/v2.1
+  source_schema_versions: ["2.1"]
+  description: Schema 2.1 API 文档的版本隔离 RAG Profile。
+
+components:
+  markdown_to_yaml: src.rag.api_document_profile.ApiDocumentMarkdownToYamlParser
+  yaml_to_zvec: src.rag.api_document_profile.Schema21ApiDocumentYamlToZvecMapper
+  exact_retriever: src.rag.api_document_profile.ApiDocumentExactRetriever
+  similarity_retriever: src.rag.api_document_profile.ApiDocumentSimilarityRetriever
+
+collection:
+  # 目前沿用线上 17 标量字段 + dense/sparse 双向量；字段变化应以新 Profile 版本演进。
+  fields:
+    - {name: namespace, type: STRING, indexed: true, source: "documents[].namespace + documents[].version"}
+    - {name: api_id, type: STRING, indexed: true, source: "派生 chunk_id"}
+    - {name: name, type: STRING, indexed: true, source: "documents[].name"}
+    - {name: version, type: STRING, indexed: true, source: "版本化 namespace 最后一段"}
+    - {name: kind, type: STRING, indexed: true, source: "documents[].use.category"}
+    - {name: language, type: STRING, indexed: true, source: "documents[].language"}
+    - {name: version_support, type: ARRAY_STRING, indexed: true, source: "documents[].use.product_support"}
+    - {name: deprecated, type: BOOL, indexed: true, source: "false"}
+    - {name: ingested_at, type: INT64, indexed: true, source: "摄取时间"}
+    - {name: api_name, type: STRING, indexed: false, source: "name + summary"}
+    - {name: description, type: STRING, indexed: false, source: "documents[].use.description"}
+    - {name: signature, type: STRING, indexed: false, source: "function_details.signature"}
+    - {name: parameters_md, type: STRING, indexed: false, source: "输入/输出参数渲染"}
+    - {name: returns_json, type: STRING, indexed: false, source: "output_parameters"}
+    - {name: examples, type: ARRAY_STRING, indexed: false, source: "documents[].use.examples"}
+    - {name: source_markdown, type: STRING, indexed: false, source: "2.1 use 渲染 Markdown"}
+    - {name: deprecation_note, type: STRING, indexed: false, source: "空字符串"}
+  vectors:
+    - {name: dense_embedding, type: VECTOR_FP32, dimension_from: embedder.dimension, metric: COSINE, source: description + api_name + name}
+    - {name: sparse_embedding, type: SPARSE_VECTOR_FP32, dimension: 0, metric: IP, source: api_id + signature + name}
+
+retrieval:
+  exact: {identity_fields: [name, api_id], required_filters: [namespace, version]}
+  similarity: {vector_field: dense_embedding, required_filters: [namespace, version]}
