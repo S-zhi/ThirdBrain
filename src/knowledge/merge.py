@@ -13,6 +13,7 @@ from src.knowledge.models import (
     ArtifactDraft,
     ArtifactStatus,
     ChangeAction,
+    Confidence,
     KnowledgeClaim,
     MergeAction,
 )
@@ -36,37 +37,43 @@ def _ordered_unique(values: tuple[str, ...], extra: tuple[str, ...]) -> tuple[st
     return tuple(dict.fromkeys((*values, *extra)))
 
 
-def _claim_key(claim: KnowledgeClaim) -> tuple[object, ...]:
-    """为 Claim 建立含 provenance 的去重键，避免仅按文案误合并。"""
-
-    evidence = tuple(
-        (
-            item.rag_collection_id,
-            item.document_id,
-            item.part_id,
-            item.content_hash,
-            item.char_start,
-            item.char_end,
-        )
-        for item in claim.evidence
-    )
-    return (claim.text, claim.confidence, evidence)
+def _claim_key(claim: KnowledgeClaim) -> str:
+    """按 text 作为 Claim 的去重与合并键。"""
+    return claim.text
 
 
 def _merge_claims(
     current: tuple[KnowledgeClaim, ...],
     incoming: tuple[KnowledgeClaim, ...],
 ) -> tuple[KnowledgeClaim, ...]:
-    """合并同一规范 Artifact 的 Claim，保留旧的来源事实。"""
+    """合并同一规范的 Claim：同 text 视为同一 fact，合并 evidence，confidence 取 max。"""
+    by_key: dict[str, KnowledgeClaim] = {}
 
-    seen: set[tuple[object, ...]] = set()
-    merged: list[KnowledgeClaim] = []
-    for claim in (*current, *incoming):
+    def upsert(claim: KnowledgeClaim) -> None:
         key = _claim_key(claim)
-        if key not in seen:
-            seen.add(key)
-            merged.append(claim)
-    return tuple(merged)
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = claim.model_copy(deep=True)
+        else:
+            # 合并 evidence (按 content_hash 去重)
+            seen_hash = {e.content_hash for e in existing.evidence}
+            merged_evidence = tuple(
+                list(existing.evidence)
+                + [e for e in claim.evidence if e.content_hash not in seen_hash]
+            )
+            # confidence 取 max
+            levels = {Confidence.LOW: 0, Confidence.MEDIUM: 1, Confidence.HIGH: 2}
+            new_conf = max((existing.confidence, claim.confidence), key=levels.__getitem__)
+            by_key[key] = existing.model_copy(
+                update={
+                    "evidence": merged_evidence,
+                    "confidence": new_conf,
+                }
+            )
+
+    for claim in (*current, *incoming):
+        upsert(claim)
+    return tuple(by_key.values())
 
 
 def _merge_draft(current: ArtifactDraft, incoming: ArtifactDraft) -> ArtifactDraft:
