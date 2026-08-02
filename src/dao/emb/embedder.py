@@ -328,13 +328,26 @@ class LocalEmbedder(Embedder):
         self._sparse = TFIDFSparseEncoder()  # bm25_language 占位，未来扩展
 
     def _ensure_model(self) -> SentenceTransformer:
-        """懒加载 sentence-transformers 模型。
+        """懒加载 sentence-transformers 模型，并在加载时验证输出 dimension。
 
         第一次调用会下载模型权重（如果不在 HF cache），可能耗时 30s+；
-        后续调用直接返回缓存对象。
+        加载后立即用 dummy text 验证 dimension，不匹配则抛 EmbedderError 并
+        释放缓存，避免后续 embed_dense 反复触发同样的 dimension 错误。
         """
         if self._model is None:
-            self._model = SentenceTransformer(self._model_name)
+            candidate = SentenceTransformer(self._model_name)
+            # 立即用 dummy text 验证 dimension
+            test_vec = candidate.encode("test", convert_to_numpy=True).tolist()
+            if len(test_vec) != self._dim:
+                # 释放 candidate——避免 30s+ 加载 + 100ms encode 反复白费
+                del candidate
+                import gc
+                gc.collect()
+                raise EmbedderError(
+                    f"sentence-transformers 模型 {self._model_name} 输出 {len(test_vec)} 维，"
+                    f"与配置的 {self._dim} 不匹配"
+                )
+            self._model = candidate
         return self._model
 
     def embed_dense(self, text: str, mode: Mode = "document") -> list[float]:
@@ -342,17 +355,9 @@ class LocalEmbedder(Embedder):
 
         Returns:
             list[float]，长度 = :attr:`_dim`。
-
-        Raises:
-            EmbedderError: 模型输出维度与配置不匹配。
         """
         model = self._ensure_model()
         vec = model.encode(text, convert_to_numpy=True, normalize_embeddings=False).tolist()
-        if len(vec) != self._dim:
-            raise EmbedderError(
-                f"sentence-transformers 模型 {self._model_name} 输出 {len(vec)} 维，"
-                f"与配置的 {self._dim} 不匹配"
-            )
         return vec
 
     def embed_sparse(self, text: str, mode: Mode = "document") -> dict[int, float]:

@@ -13,6 +13,18 @@ def project_root():
 
 
 @pytest.fixture
+def use_tmp_config(isolated_config):
+    """Alias for isolated_config to support legacy test scripts."""
+    return isolated_config
+
+
+@pytest.fixture
+def tmp_config(isolated_config):
+    """Alias for isolated_config to support legacy test scripts."""
+    return isolated_config
+
+
+@pytest.fixture
 def isolated_config(tmp_path, monkeypatch):
     """每个测试用临时 config.yaml + 临时 collection 路径，避免污染真实配置。
 

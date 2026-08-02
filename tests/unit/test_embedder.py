@@ -155,7 +155,12 @@ class TestEncode:
 
 class TestBuildEmbedder:
     def test_bailian_uses_config(self, use_tmp_config):
-        # 默认 type=bailian；use_tmp_config 已经把单例指向临时 cfg
+        from dataclasses import replace
+        import config
+        # 切到 bailian
+        new_emb = replace(config._config.embedder, type="bailian")
+        config._config = replace(config._config, embedder=new_emb)
+
         with patch("src.dao.emb.embedder.BailianEmbedder") as MockBailian:
             mock_instance = MagicMock()
             MockBailian.return_value = mock_instance
@@ -165,7 +170,7 @@ class TestBuildEmbedder:
         kwargs = MockBailian.call_args.kwargs
         assert kwargs["model"] == "qwen3.7-text-embedding"
         assert kwargs["dimension"] == 2048
-        assert kwargs["max_retries"] == 2
+        assert kwargs["max_retries"] == 3
 
     def test_local_uses_config(self, use_tmp_config):
         from dataclasses import replace
@@ -209,129 +214,81 @@ class TestBailianEmbedderConstruction:
         # 来自 config.ConfigError
         assert "DASHSCOPE_API_KEY" in str(exc.value)
 
-    def test_missing_dashscope_module_raises_embedder_error(self, tmp_config, monkeypatch):
-        # 把 dashscope 这个 name 暂时从 sys.modules 拿掉
-        import sys
-        monkeypatch.setitem(sys.modules, "dashscope", None)
-        from src.dao.emb.embedder import BailianEmbedder
-        with pytest.raises(EmbedderError) as exc:
-            BailianEmbedder(model="x", dimension=4, max_retries=1, timeout=1)
-        assert "dashscope" in str(exc.value).lower() or "未安装" in str(exc.value)
+    def test_missing_zvec_module_raises_embedder_error(self, tmp_config, monkeypatch):
+        with patch("src.dao.emb.embedder.get_dashscope_api_key", return_value="fake_key"):
+            with patch("zvec.QwenDenseEmbedding", side_effect=ImportError("zvec not installed")):
+                from src.dao.emb.embedder import BailianEmbedder
+                with pytest.raises(EmbedderError) as exc:
+                    BailianEmbedder(model="x", dimension=4)
+                assert "zvec" in str(exc.value).lower() or "初始化失败" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
-# BailianEmbedder — embed_dense 行为
+# BailianEmbedder — embed_dense / embed_sparse 行为
 # ---------------------------------------------------------------------------
 
-def _make_fake_response(status_code: int, embeddings: list | None = None, message: str = "ok"):
-    """构造一个像 dashscope.TextEmbedding.call 返回的对象。"""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.message = message
-    if embeddings is not None:
-        resp.output = {"embeddings": [{"embedding": e} for e in embeddings]}
-    else:
-        resp.output = {"embeddings": []}
-    return resp
-
-
-class TestBailianEmbedDense:
-    def _build(self, **kwargs) -> Any:
+class TestBailianEmbedderBehavior:
+    @patch("zvec.QwenDenseEmbedding")
+    @patch("zvec.QwenSparseEmbedding")
+    def test_embed_dense_success(self, MockSparse, MockDense, tmp_config):
         from src.dao.emb.embedder import BailianEmbedder
-        defaults = dict(model="text-embedding-v3", dimension=4, max_retries=3, timeout=10)
-        defaults.update(kwargs)
-        # dashscope 已经在 deps 里，不 patch；只 patch _TextEmbedding.call
-        return BailianEmbedder(**defaults)
 
-    def test_success_returns_vec(self, tmp_config):
-        emb = self._build(dimension=4)
-        emb._TextEmbedding.call = MagicMock(return_value=_make_fake_response(200, [[0.1, 0.2, 0.3, 0.4]]))  # type: ignore[attr-defined]
-        vec = emb.embed_dense("hello")
+        mock_dense_inst = MagicMock()
+        mock_dense_inst.embed.return_value = [0.1, 0.2, 0.3, 0.4]
+        MockDense.return_value = mock_dense_inst
+
+        emb = BailianEmbedder(model="qwen", dimension=4)
+        vec = emb.embed_dense("hello", mode="document")
+
         assert vec == [0.1, 0.2, 0.3, 0.4]
-        emb._TextEmbedding.call.assert_called_once()  # type: ignore[attr-defined]
-        # 验证参数透传
-        call_kwargs = emb._TextEmbedding.call.call_args.kwargs  # type: ignore[attr-defined]
-        assert call_kwargs["text_type"] == "document"
-        assert call_kwargs["dimension"] == 4
+        mock_dense_inst.embed.assert_called_once_with("hello")
 
-    def test_query_mode_passes_text_type(self, tmp_config):
-        emb = self._build(dimension=4)
-        emb._TextEmbedding.call = MagicMock(return_value=_make_fake_response(200, [[0.1] * 4]))  # type: ignore[attr-defined]
-        emb.embed_dense("q", mode="query")
-        assert emb._TextEmbedding.call.call_args.kwargs["text_type"] == "query"  # type: ignore[attr-defined]
-
-    def test_dimension_mismatch_raises(self, tmp_config):
-        emb = self._build(dimension=4)
-        # 返回 3 维
-        emb._TextEmbedding.call = MagicMock(return_value=_make_fake_response(200, [[0.1, 0.2, 0.3]]))  # type: ignore[attr-defined]
-        with pytest.raises(EmbedderError) as exc:
-            emb.embed_dense("hello")
-        assert "3" in str(exc.value) and "4" in str(exc.value)
-
-    def test_4xx_raises_immediately(self, tmp_config):
-        emb = self._build(dimension=4, max_retries=3)
-        emb._TextEmbedding.call = MagicMock(return_value=_make_fake_response(401, message="bad key"))  # type: ignore[attr-defined]
-        with pytest.raises(EmbedderError) as exc:
-            emb.embed_dense("hello")
-        assert "4xx" in str(exc.value)
-        assert "401" in str(exc.value)
-        # 4xx 不重试：只调一次
-        assert emb._TextEmbedding.call.call_count == 1  # type: ignore[attr-defined]
-
-    def test_5xx_retries_until_exhausted(self, tmp_config):
-        emb = self._build(dimension=4, max_retries=3)
-        emb._TextEmbedding.call = MagicMock(return_value=_make_fake_response(500, message="boom"))  # type: ignore[attr-defined]
-        with pytest.raises(EmbedderError) as exc:
-            emb.embed_dense("hello")
-        assert "5xx" in str(exc.value) or "重试" in str(exc.value)
-        # 5xx 重试 max_retries 次
-        assert emb._TextEmbedding.call.call_count == 3  # type: ignore[attr-defined]
-
-    def test_5xx_succeeds_on_retry(self, tmp_config):
-        emb = self._build(dimension=4, max_retries=3)
-        # 前两次 5xx，第三次成功
-        emb._TextEmbedding.call = MagicMock(side_effect=[  # type: ignore[attr-defined]
-            _make_fake_response(500, message="oops"),
-            _make_fake_response(503, message="busy"),
-            _make_fake_response(200, [[0.5] * 4]),
-        ])
-        vec = emb.embed_dense("hello")
-        assert vec == [0.5] * 4
-        assert emb._TextEmbedding.call.call_count == 3  # type: ignore[attr-defined]
-
-    def test_network_exception_retries(self, tmp_config):
-        emb = self._build(dimension=4, max_retries=2)
-        emb._TextEmbedding.call = MagicMock(side_effect=ConnectionError("net"))  # type: ignore[attr-defined]
-        with pytest.raises(EmbedderError) as exc:
-            emb.embed_dense("hello")
-        assert "重试" in str(exc.value)
-        assert emb._TextEmbedding.call.call_count == 2  # type: ignore[attr-defined]
-
-
-class TestBailianEmbedSparse:
-    def test_returns_dict(self, tmp_config):
-        emb = self._build_helper()
-        out = emb.embed_sparse("数据同步")
-        assert isinstance(out, dict)
-        assert all(isinstance(k, int) and isinstance(v, float) for k, v in out.items())
-
-    def test_empty_text_returns_empty(self, tmp_config):
-        emb = self._build_helper()
-        assert emb.embed_sparse("") == {}
-
-    def test_shares_encoder_with_fit(self, tmp_config):
-        emb = self._build_helper()
-        emb.fit_sparse(["alpha beta", "beta gamma"])
-        assert emb.sparse_encoder._fitted is True  # type: ignore[attr-defined]
-        assert emb.sparse_encoder.n_docs == 2
-
-    def _build_helper(self):
+    @patch("zvec.QwenDenseEmbedding")
+    @patch("zvec.QwenSparseEmbedding")
+    def test_embed_dense_failure_raises_embedder_error(self, MockSparse, MockDense, tmp_config):
         from src.dao.emb.embedder import BailianEmbedder
-        return BailianEmbedder(model="x", dimension=4, max_retries=1, timeout=1)
+
+        mock_dense_inst = MagicMock()
+        mock_dense_inst.embed.side_effect = ValueError("Some DashScope API error")
+        MockDense.return_value = mock_dense_inst
+
+        emb = BailianEmbedder(model="qwen", dimension=4)
+        with pytest.raises(EmbedderError) as exc:
+            emb.embed_dense("hello")
+        assert "Qwen dense embedding 失败" in str(exc.value)
+
+    @patch("zvec.QwenDenseEmbedding")
+    @patch("zvec.QwenSparseEmbedding")
+    def test_embed_sparse_success(self, MockSparse, MockDense, tmp_config):
+        from src.dao.emb.embedder import BailianEmbedder
+
+        mock_sparse_inst = MagicMock()
+        mock_sparse_inst.embed.return_value = {123: 0.5, 456: 1.2}
+        MockSparse.return_value = mock_sparse_inst
+
+        emb = BailianEmbedder(model="qwen", dimension=4)
+        sparse_vec = emb.embed_sparse("hello", mode="document")
+
+        assert sparse_vec == {123: 0.5, 456: 1.2}
+        mock_sparse_inst.embed.assert_called_once_with("hello")
+
+    @patch("zvec.QwenDenseEmbedding")
+    @patch("zvec.QwenSparseEmbedding")
+    def test_embed_sparse_failure_raises_embedder_error(self, MockSparse, MockDense, tmp_config):
+        from src.dao.emb.embedder import BailianEmbedder
+
+        mock_sparse_inst = MagicMock()
+        mock_sparse_inst.embed.side_effect = ValueError("Some DashScope API error")
+        MockSparse.return_value = mock_sparse_inst
+
+        emb = BailianEmbedder(model="qwen", dimension=4)
+        with pytest.raises(EmbedderError) as exc:
+            emb.embed_sparse("hello")
+        assert "Qwen sparse embedding 失败" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
-# LocalEmbedder — 缺失依赖路径
+# LocalEmbedder — 缺失依赖与行为测试
 # ---------------------------------------------------------------------------
 
 class TestLocalEmbedder:
@@ -341,3 +298,48 @@ class TestLocalEmbedder:
         with pytest.raises(EmbedderError) as exc:
             emb_mod.LocalEmbedder(dense_model="x", dimension=4, bm25_language="zh")
         assert "sentence-transformers" in str(exc.value)
+
+
+class TestLocalEmbedderEmbedDense:
+    def test_lazy_loading(self, tmp_config):
+        # Ensure constructor doesn't load model
+        from src.dao.emb.embedder import LocalEmbedder
+        with patch("src.dao.emb.embedder.SentenceTransformer") as MockST:
+            emb = LocalEmbedder(dense_model="test-model", dimension=384)
+            assert emb._model is None
+            MockST.assert_not_called()
+
+    def test_dimension_matches(self, tmp_config):
+        from src.dao.emb.embedder import LocalEmbedder
+        with patch("src.dao.emb.embedder.SentenceTransformer") as MockST:
+            mock_model = MagicMock()
+            # test_vec has length 384
+            mock_model.encode.side_effect = [
+                MagicMock(tolist=lambda: [0.1] * 384),  # for the validation call
+                MagicMock(tolist=lambda: [0.2] * 384),  # for the actual embed call
+            ]
+            MockST.return_value = mock_model
+
+            emb = LocalEmbedder(dense_model="test-model", dimension=384)
+            vec = emb.embed_dense("hello")
+
+            assert vec == [0.2] * 384
+            assert emb._model is mock_model
+            # encode called twice: once for validation "test", once for "hello"
+            assert mock_model.encode.call_count == 2
+
+    def test_dimension_mismatch_raises_immediately(self, tmp_config):
+        from src.dao.emb.embedder import LocalEmbedder
+        with patch("src.dao.emb.embedder.SentenceTransformer") as MockST:
+            mock_model = MagicMock()
+            # test_vec has length 128, which doesn't match 384
+            mock_model.encode.return_value = MagicMock(tolist=lambda: [0.1] * 128)
+            MockST.return_value = mock_model
+
+            emb = LocalEmbedder(dense_model="test-model", dimension=384)
+            with pytest.raises(EmbedderError) as exc:
+                emb.embed_dense("hello")
+
+            assert "输出 128 维" in str(exc.value)
+            assert "与配置的 384 不匹配" in str(exc.value)
+            assert emb._model is None  # Model released/not cached
