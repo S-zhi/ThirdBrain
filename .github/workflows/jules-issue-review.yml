@@ -122,10 +122,13 @@ jobs:
               json.dump(payload, f, ensure_ascii=False, indent=2)
           "
 
-      - name: Call Jules Remote API
+      - name: Call Jules Remote API & Comment on Issue
         id: call_jules
         env:
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
           echo "=== Executing Jules API Call ==="
           
@@ -135,6 +138,23 @@ jobs:
               -H "X-Goog-Api-Key: ${JULES_API_KEY}" \
               -d @jules_payload.json)
             echo "API Response: $RESPONSE"
+            
+            SESSION_NAME=$(python3 -c "import json; data=json.loads('''$RESPONSE'''); print(data.get('name', ''))" 2>/dev/null || true)
+            
+            if [ -n "$SESSION_NAME" ]; then
+              gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body "🤖 **Jules Agent 已响应并启动分析**
+
+- **Session**: \`${SESSION_NAME}\`
+- **处理状态**: 正在进行深度需求与评论分析...
+
+> *提示：Jules 正在云端评估需求可行性与解答评论疑问，结果将在此 Issue 中同步回复。*"
+            else
+              gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body "⚠️ **Jules API 调用收到错误响应**
+
+\`\`\`json
+${RESPONSE}
+\`\`\`"
+            fi
           else
             echo "::warning::secrets.JULES_API_KEY 未配置，跳过 Jules API 调用。"
           fi
