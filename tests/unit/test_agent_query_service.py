@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -193,3 +194,135 @@ async def test_batch_keeps_order_ids_and_failure_isolation() -> None:
     assert results[0].result is not None
     assert results[1].error is not None
     assert [record.batch_id for record in writer.records] == ["batch-1", "batch-1"]
+
+
+class FakeHeatmapCounter:
+    def __init__(self, delay: float = 0.0, should_fail: bool = False) -> None:
+        self.delay = delay
+        self.should_fail = should_fail
+        self.recorded_hits = []
+
+    async def record_hits(self, collection_name: str, api_ids: list[str]) -> None:
+        if self.delay > 0:
+            await asyncio.sleep(self.delay)
+        if self.should_fail:
+            raise RuntimeError("Redis connection error")
+        self.recorded_hits.append((collection_name, api_ids))
+
+
+class FakeAppState:
+    def __init__(self) -> None:
+        self.pending_heatmap_tasks = set()
+
+
+@pytest.mark.asyncio
+async def test_heatmap_task_strong_references_and_cleanup() -> None:
+    """测试 heatmap task 能够被强引用记录到 pending 集合，并于完成后被 discard。"""
+    retriever = FakeRetriever()
+    writer = FakeRecordWriter()
+    heatmap_counter = FakeHeatmapCounter(delay=0.1)
+    app_state = FakeAppState()
+
+    service = AgentQueryService(
+        retriever,
+        writer,
+        collection_name="api_docs",
+        heatmap_counter=heatmap_counter,
+        app_state=app_state,
+    )
+
+    result = await service.query_once(_command(), request_id="request-1")
+
+    # 刚 query_once 完（由于 delay=0.1，hits 任务处于 pending 状态）
+    assert len(service._pending_tasks) == 1
+    assert len(app_state.pending_heatmap_tasks) == 1
+
+    # 获取正在运行的 task
+    task = next(iter(service._pending_tasks))
+    assert not task.done()
+
+    # 等待 task 运行结束
+    await task
+    assert len(service._pending_tasks) == 0
+    assert len(app_state.pending_heatmap_tasks) == 0
+    assert heatmap_counter.recorded_hits == [("api_docs", ["com.example.api.v2.foo"])]
+
+
+@pytest.mark.asyncio
+async def test_swallow_task_exception_cancelled_vs_failed(caplog: pytest.LogCaptureFixture) -> None:
+    """测试 _swallow_task_exception 能够正确区分 cancellation 与 普通 exception。"""
+    import asyncio
+    from src.service.agent_query_service import _swallow_task_exception
+
+    # 1. 模拟 Cancellation
+    async def cancel_me():
+        raise asyncio.CancelledError()
+
+    task_cancel = asyncio.create_task(cancel_me())
+    try:
+        await task_cancel
+    except asyncio.CancelledError:
+        pass
+
+    assert task_cancel.cancelled() is True
+    with caplog.at_level("DEBUG"):
+        _swallow_task_exception(task_cancel)
+    assert any("heatmap.task_cancelled" in record.message for record in caplog.records)
+
+    # 2. 模拟 Exception
+    async def fail_me():
+        raise RuntimeError("Secret Database error")
+
+    caplog.clear()
+    task_fail = asyncio.create_task(fail_me())
+    try:
+        await task_fail
+    except Exception:
+        pass
+
+    assert task_fail.cancelled() is False
+    assert task_fail.exception() is not None
+    with caplog.at_level("WARNING"):
+        _swallow_task_exception(task_fail)
+    assert any("heatmap.task_failed" in record.message for record in caplog.records)
+    # Check that exc_info was logged
+    fail_record = next(r for r in caplog.records if "heatmap.task_failed" in r.message)
+    assert fail_record.exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown_awaits_pending_tasks() -> None:
+    """模拟 lifespan 阶段的 shutdown，验证 pending 状态的 task 能够被 await 完成。"""
+    import asyncio
+    retriever = FakeRetriever()
+    writer = FakeRecordWriter()
+    heatmap_counter = FakeHeatmapCounter(delay=0.05)
+    app_state = FakeAppState()
+
+    service = AgentQueryService(
+        retriever,
+        writer,
+        collection_name="api_docs",
+        heatmap_counter=heatmap_counter,
+        app_state=app_state,
+    )
+
+    # 创建 10 个 query，从而生成 10 个 pending tasks
+    for i in range(10):
+        await service.query_once(_command(), request_id=f"req-{i}")
+
+    pending = app_state.pending_heatmap_tasks
+    assert len(pending) == 10
+    for task in pending:
+        assert not task.done()
+
+    # 模拟 main.py shutdown 阶段的 await 逻辑
+    await asyncio.wait_for(
+        asyncio.gather(*pending, return_exceptions=True),
+        timeout=1.0,
+    )
+
+    # 验证所有 task 都已运行完，且被 discard
+    assert len(app_state.pending_heatmap_tasks) == 0
+    assert len(service._pending_tasks) == 0
+    assert len(heatmap_counter.recorded_hits) == 10

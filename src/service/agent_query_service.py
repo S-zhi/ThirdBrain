@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from src.dao.emb import (
@@ -43,10 +43,15 @@ def _swallow_task_exception(task: asyncio.Task[object]) -> None:
     后异常会进 ``task.exception()`` 缓存、不会冒泡。
     """
     if task.cancelled():
+        logger.debug("heatmap.task_cancelled name=%s", task.get_name())
         return
     exc = task.exception()
     if exc is not None:
-        logger.warning("heatmap.task_failed error_type=%s", type(exc).__name__)
+        logger.warning(
+            "heatmap.task_failed error_type=%s",
+            type(exc).__name__,
+            exc_info=exc,
+        )
 
 
 class AgentQueryType(StrEnum):
@@ -316,6 +321,7 @@ class AgentQueryService:
         *,
         collection_name: str,
         heatmap_counter: HeatmapCounter | None = None,
+        app_state: Any = None,
     ) -> None:
         """注入检索实现、查询记录写入器和固定 collection 名。
 
@@ -327,6 +333,8 @@ class AgentQueryService:
         self._record_writer = record_writer
         self._collection_name = collection_name
         self._heatmap_counter = heatmap_counter
+        self._app_state = app_state
+        self._pending_tasks: set[asyncio.Task[object]] = set()
 
     def _record_heatmap_hits(self, documents: tuple[AgentApiDocument, ...]) -> None:
         """fire-and-forget 异步计数本轮命中的 API。
@@ -345,6 +353,15 @@ class AgentQueryService:
         task = asyncio.create_task(
             self._heatmap_counter.record_hits(self._collection_name, api_ids)
         )
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+        if self._app_state is not None:
+            if not hasattr(self._app_state, "pending_heatmap_tasks"):
+                self._app_state.pending_heatmap_tasks = set()
+            self._app_state.pending_heatmap_tasks.add(task)
+            task.add_done_callback(self._app_state.pending_heatmap_tasks.discard)
+
         task.add_done_callback(_swallow_task_exception)
 
     @staticmethod
@@ -530,6 +547,7 @@ def build_agent_query_service(
     collection_name: str,
     profile: RagSchemaProfile | None = None,
     heatmap_counter: HeatmapCounter | None = None,
+    app_state: Any = None,
 ) -> AgentQueryService:
     """使用生产 Zvec 检索器和 Mongo DAO 组装查询 Service。
 
@@ -542,4 +560,5 @@ def build_agent_query_service(
         record_dao,
         collection_name=collection_name,
         heatmap_counter=heatmap_counter,
+        app_state=app_state,
     )
