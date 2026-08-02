@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from time import perf_counter
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from src.knowledge.context_builder import BUDGETS, build_recall_capsule
@@ -32,6 +33,9 @@ from src.knowledge.readers import (
     PublishedArtifactKnowledgeReader,
     RelationReader,
 )
+
+if TYPE_CHECKING:
+    from src.knowledge.graph.storage import MongoRelationGraphStore
 
 READER_TIMEOUT_SECONDS = 10.0
 
@@ -357,9 +361,24 @@ class KnowledgeQueryService:
 
 def build_knowledge_query_service(
     artifact_repository: KnowledgeRepository,
+    *,
+    graph_store: MongoRelationGraphStore | None = None,
 ) -> KnowledgeQueryService:
-    """组装独立 Knowledge Catalog 与可重建派生索引。"""
+    """组装独立 Knowledge Catalog 与可重建派生索引。
+
+    ``graph_store`` 传入时启用图召回：top-N rerank 出的 artifact 会被
+    ``GraphRelationReader`` 沿着出边一跳扩展，召回邻接的 API。
+    不传或为 ``None`` 时回退到 ``EmptyRelationReader``（即 ``expand_relations``
+    选项等价 no-op，便于本地起服务时跳过 Mongo 图集合）。
+    """
+
+    from src.knowledge.graph.reader import GraphRelationReader  # 避免循环导入
+
+    if graph_store is None:
+        relation_reader: RelationReader = EmptyRelationReader()
+    else:
+        relation_reader = GraphRelationReader(graph_store, artifact_repository)
     return KnowledgeQueryService(
         PublishedArtifactKnowledgeReader(artifact_repository),
-        EmptyRelationReader(),
+        relation_reader,
     )

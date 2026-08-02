@@ -244,8 +244,14 @@ def _artifact_confidence(artifact: ActiveArtifact) -> Confidence:
     )
 
 
-def _artifact_item(artifact: ActiveArtifact) -> KnowledgeItem:
-    """把模块一正式 ActiveArtifact 投影为查询模型。"""
+def artifact_to_knowledge_item(artifact: ActiveArtifact) -> KnowledgeItem:
+    """把模块一正式 ActiveArtifact 投影为查询模型。
+
+    同时被 :class:`PublishedArtifactKnowledgeReader`（主召回通道）和
+    :class:`src.knowledge.graph.reader.GraphRelationReader`（图召回通道）
+    共用，是 ActiveArtifact → KnowledgeItem 的唯一对外入口。
+    """
+
     evidence_by_key: dict[tuple[str, str, str], QueryEvidenceRef] = {}
     for claim in artifact.draft.claims:
         for evidence in claim.evidence:
@@ -293,6 +299,10 @@ def _artifact_item(artifact: ActiveArtifact) -> KnowledgeItem:
         provenance=tuple(evidence_by_key.values()),
         relationships=relations,
     )
+
+
+# 内部别名保留，避免改动 PublishedArtifactKnowledgeReader 内的现有调用
+_artifact_item = artifact_to_knowledge_item
 
 
 def _lexical_score(query: str, item: KnowledgeItem) -> int:

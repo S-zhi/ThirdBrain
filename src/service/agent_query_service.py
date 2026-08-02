@@ -29,8 +29,24 @@ from src.dao.mongo import (
     QueryStrategy,
 )
 from src.rag import RagSchemaProfile, get_rag_profile
+from src.service.heatmap_counter import HeatmapCounter
 
 logger = logging.getLogger(__name__)
+
+
+def _swallow_task_exception(task: asyncio.Task[object]) -> None:
+    """兜底吞掉 fire-and-forget 任务的未捕获异常。
+
+    正常情况下 :class:`HeatmapCounter.record_hits` 内部已经 try/except，
+    但 ``asyncio.create_task`` 抛出的非预期异常会触发 Python 的
+    ``Task exception was never retrieved`` warning。把 callback 挂上
+    后异常会进 ``task.exception()`` 缓存、不会冒泡。
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("heatmap.task_failed error_type=%s", type(exc).__name__)
 
 
 class AgentQueryType(StrEnum):
@@ -299,11 +315,37 @@ class AgentQueryService:
         record_writer: QueryRecordWriter,
         *,
         collection_name: str,
+        heatmap_counter: HeatmapCounter | None = None,
     ) -> None:
-        """注入检索实现、查询记录写入器和固定 collection 名。"""
+        """注入检索实现、查询记录写入器和固定 collection 名。
+
+        ``heatmap_counter`` 为可选旁路观测组件：每次成功 retrieve 后会
+        fire-and-forget 触发一次命中计数；为 None 或 Redis 不可用时
+        主流程完全无感。
+        """
         self._retriever = retriever
         self._record_writer = record_writer
         self._collection_name = collection_name
+        self._heatmap_counter = heatmap_counter
+
+    def _record_heatmap_hits(self, documents: tuple[AgentApiDocument, ...]) -> None:
+        """fire-and-forget 异步计数本轮命中的 API。
+
+        行为约定：
+        - 不 ``await``，立刻返回；不阻塞主流程。
+        - 内部失败（counter 为 None / Redis 不可用 / 任何异常）由
+          :class:`HeatmapCounter` 和 :func:`_swallow_task_exception` 兜底，
+          不影响 ``query_once`` 的返回。
+        """
+        if self._heatmap_counter is None or not documents:
+            return
+        api_ids = [doc.api_id for doc in documents if doc.api_id]
+        if not api_ids:
+            return
+        task = asyncio.create_task(
+            self._heatmap_counter.record_hits(self._collection_name, api_ids)
+        )
+        task.add_done_callback(_swallow_task_exception)
 
     @staticmethod
     def _strategy(query_type: AgentQueryType) -> QueryStrategy:
@@ -433,6 +475,7 @@ class AgentQueryService:
             duration_ms=duration_ms,
         )
         record_status = await self._persist_record(record)
+        self._record_heatmap_hits(documents)
         return AgentQueryResult(
             query_record_id=query_record_id,
             record_status=record_status,
@@ -486,11 +529,17 @@ def build_agent_query_service(
     *,
     collection_name: str,
     profile: RagSchemaProfile | None = None,
+    heatmap_counter: HeatmapCounter | None = None,
 ) -> AgentQueryService:
-    """使用生产 Zvec 检索器和 Mongo DAO 组装查询 Service。"""
+    """使用生产 Zvec 检索器和 Mongo DAO 组装查询 Service。
+
+    ``heatmap_counter`` 可选；传入后会在每次成功 retrieve 时异步
+    记录命中次数。
+    """
     retriever = ZvecAgentQueryRetriever(collection_name, profile=profile)
     return AgentQueryService(
         retriever,
         record_dao,
         collection_name=collection_name,
+        heatmap_counter=heatmap_counter,
     )
