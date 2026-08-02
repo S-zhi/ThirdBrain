@@ -115,8 +115,7 @@ jobs:
 
           payload = {
               'prompt': prompt_text.strip(),
-              'requirePlanApproval': False,
-              'automationMode': 'NONE'
+              'requirePlanApproval': True
           }
 
           with open('jules_payload.json', 'w', encoding='utf-8') as f:
