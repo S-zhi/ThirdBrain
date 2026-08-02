@@ -17,6 +17,8 @@ from src.knowledge.models import (
     ArtifactStatus,
     SourceRevision,
     SourceState,
+    _PublishAlreadyDone,
+    _PublishConflict,
     stable_source_id,
 )
 
@@ -139,7 +141,7 @@ class InMemoryKnowledgeRepository:
             if entry is None:
                 raise KeyError(f"unknown knowledge staging: {staging_id}")
             if entry.state != "staged":
-                raise RuntimeError(f"knowledge staging is not publishable: {entry.state}")
+                raise _PublishAlreadyDone(f"staging {staging_id} 已被并发标为 {entry.state}")
 
             source = entry.source_revision
             self._source_revisions[source.source_revision_id] = source.model_copy(deep=True)
@@ -182,8 +184,8 @@ class InMemoryKnowledgeRepository:
             entry = self._staging.get(staging_id)
             if entry is None:
                 return
-            if entry.state == "published":
-                raise RuntimeError("published staging cannot be abandoned")
+            if entry.state != "staged":
+                return
             entry.state = "abandoned"
             entry.reason = reason
 

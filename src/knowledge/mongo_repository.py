@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -23,9 +24,14 @@ from src.knowledge.models import (
     ArtifactStatus,
     SourceRevision,
     SourceState,
+    _PublishAlreadyDone,
+    _PublishConflict,
     sha256_text,
     stable_source_id,
+    utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 SOURCE_REVISIONS_COLLECTION = "knowledge_source_revisions"
 ARTIFACT_REVISIONS_COLLECTION = "knowledge_artifact_revisions"
@@ -364,7 +370,9 @@ class MongoKnowledgeRepository:
 
         entry = await self._load_staging(staging_id)
         if entry.get("state") != "staged":
-            raise RuntimeError(f"knowledge staging is not publishable: {entry.get('state')}")
+            raise _PublishAlreadyDone(
+                f"staging {staging_id} 已被并发标为 {entry.get('state')}"
+            )
         source = SourceRevision.model_validate(entry["source_revision"])
         revisions = tuple(
             ArtifactRevision.model_validate(value) for value in entry.get("artifact_revisions", [])
@@ -411,7 +419,10 @@ class MongoKnowledgeRepository:
             )
             raise remap_pymongo_error(error) from error
         if published_catalog is None:
-            raise RuntimeError("knowledge catalog changed while staging; retry update")
+            raise _PublishConflict(
+                f"catalog {entry['catalog_id']} revision 不在 {entry['catalog_revision']}, "
+                f"并发 publish 已胜出"
+            )
         log_op(operation="find_one_and_update", collection=catalog.name, started=started, matched=1)
         await self._mark_staging(staging_id, state="published")
         return active
@@ -419,7 +430,16 @@ class MongoKnowledgeRepository:
     async def abandon(self, staging_id: str, reason: str) -> None:
         """记录 staging 失败原因；不可达修订交给后续维护任务清理。"""
 
-        await self._mark_staging(staging_id, state="abandoned", reason=reason)
+        collection = self._staging()
+        try:
+            result = await collection.update_one(
+                {"_id": staging_id, "state": "staged"},
+                {"$set": {"state": "abandoned", "reason": reason, "abandoned_at": utc_now()}},
+            )
+            if result.matched_count == 0:
+                logger.info("knowledge.staging.abandon.noop staging_id=%s", staging_id)
+        except PyMongoError as error:
+            raise remap_pymongo_error(error) from error
 
     async def _active_catalog(self, wiki_id: str) -> dict[str, Any] | None:
         collection = self._catalog()
@@ -486,7 +506,7 @@ class MongoKnowledgeRepository:
         collection = self._staging()
         try:
             await collection.update_one(
-                {"_id": staging_id},
+                {"_id": staging_id, "state": "staged"},
                 {"$set": {"state": state, "reason": reason}},
             )
         except PyMongoError as error:

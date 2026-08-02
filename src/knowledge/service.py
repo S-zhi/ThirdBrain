@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Sequence
 from uuid import uuid4
+
+from pymongo.errors import PyMongoError
 
 from src.knowledge.contracts import KnowledgeExtractor, KnowledgeIndexWriter, KnowledgeRepository
 from src.knowledge.merge import ConservativeMergePlanner, MergeResolution
@@ -21,9 +25,13 @@ from src.knowledge.models import (
     ValidationIssue,
     ValidationSummary,
     WikiUpdateInput,
+    _PublishAlreadyDone,
+    _PublishConflict,
     utc_now,
 )
 from src.knowledge.validation import validate_extraction
+
+logger = logging.getLogger(__name__)
 
 
 class KnowledgeUpdateService:
@@ -247,8 +255,27 @@ class KnowledgeUpdateService:
             staging_id = await self._repository.stage(operation_id, source_revision, revisions)
             try:
                 published = await self._repository.publish(staging_id)
-            except Exception:
-                await self._repository.abandon(staging_id, "publish failed")
+            except _PublishConflict:
+                # 并发冲突 — 不 abandon，让调用方在更高层 retry
+                raise
+            except _PublishAlreadyDone:
+                # 幂等成功
+                return (
+                    DocumentUpdateOutcome(
+                        document_id=document.document_id,
+                        rag_collection_id=document.rag_collection_id,
+                        action=ChangeAction.UNCHANGED,
+                        validation=ValidationSummary(passed=True, issues=()),
+                    ),
+                    (),
+                )
+            except (PyMongoError, asyncio.TimeoutError) as error:
+                # 临时 IO 失败 — 标 staged 不动，让运维 / 重试协调器处理
+                logger.warning("knowledge.publish.io_error staging_id=%s err=%s", staging_id, error)
+                raise
+            except Exception as error:
+                # 真正不可恢复 — 调 abandon
+                await self._repository.abandon(staging_id, f"publish failed: {type(error).__name__}: {error}")
                 raise
             changes = tuple(
                 ArtifactChange(
@@ -269,6 +296,8 @@ class KnowledgeUpdateService:
                 ),
                 published,
             )
+        except (_PublishConflict, PyMongoError, asyncio.TimeoutError):
+            raise
         except Exception:  # noqa: BLE001 - 不向调用方泄露 provider / 存储内部细节。
             return (
                 DocumentUpdateOutcome(

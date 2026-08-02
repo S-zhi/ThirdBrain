@@ -564,3 +564,11 @@ def utc_now() -> datetime:
     """集中生成带 UTC 时区的时间，避免持久化 naive datetime。"""
 
     return datetime.now(UTC)
+
+
+class _PublishConflict(Exception):
+    """catalog 被并发更新，调用方应当重试同一 staging_id。"""
+
+
+class _PublishAlreadyDone(Exception):
+    """staging 已经被并发发布 / abandon，幂等返回。"""

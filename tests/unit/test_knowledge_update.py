@@ -493,3 +493,124 @@ def test_mongo_repository_strips_only_mongo_internal_id_before_model_validation(
     """Mongo 的 `_id` 不能泄露进启用了 extra=forbid 的领域模型。"""
 
     assert _without_mongo_id({"_id": "mongo-id", "wiki_id": "wiki-1"}) == {"wiki_id": "wiki-1"}
+
+
+from src.knowledge.models import _PublishConflict, _PublishAlreadyDone, ChangeAction
+
+
+@pytest.mark.asyncio
+async def test_repository_raises_publish_already_done_when_not_staged() -> None:
+    """如果 staging 的状态已经不是 staged，publish 应抛出 _PublishAlreadyDone。"""
+    repo = InMemoryKnowledgeRepository()
+    extractor = FakeExtractor(_draft)
+    service = KnowledgeUpdateService(repo, extractor)
+    document = _document()
+
+    # 先发布成功一次
+    await service.update_knowledge((document,))
+
+    # 找到已经发布的 staging ID 并试图再次 publish
+    staging_id = list(repo._staging.keys())[0]
+
+    with pytest.raises(_PublishAlreadyDone):
+        await repo.publish(staging_id)
+
+
+@pytest.mark.asyncio
+async def test_service_handles_publish_already_done_idempotently() -> None:
+    """如果 publish 发生 _PublishAlreadyDone 异常，服务应返回 ChangeAction.UNCHANGED，实现幂等。"""
+    repo = InMemoryKnowledgeRepository()
+    extractor = FakeExtractor(_draft)
+
+    # Mock publish to raise _PublishAlreadyDone
+    call_count = 0
+    async def mock_publish(staging_id: str):
+        nonlocal call_count
+        call_count += 1
+        raise _PublishAlreadyDone("already published")
+
+    repo.publish = mock_publish
+    service = KnowledgeUpdateService(repo, extractor)
+    document = _document()
+
+    result = await service.update_knowledge((document,))
+    assert result.status == UpdateStatus.COMPLETED
+    assert result.documents_unchanged == 1
+    assert result.outcomes[0].action == ChangeAction.UNCHANGED
+
+
+@pytest.mark.asyncio
+async def test_service_raises_publish_conflict_without_abandoning() -> None:
+    """如果 publish 抛出 _PublishConflict，应直接抛出异常供上层重试，不应调 abandon。"""
+    repo = InMemoryKnowledgeRepository()
+    extractor = FakeExtractor(_draft)
+
+    original_abandon = repo.abandon
+    abandon_called = False
+    async def mock_abandon(staging_id: str, reason: str):
+        nonlocal abandon_called
+        abandon_called = True
+        await original_abandon(staging_id, reason)
+
+    repo.abandon = mock_abandon
+
+    async def mock_publish(staging_id: str):
+        raise _PublishConflict("catalog revision conflict")
+
+    repo.publish = mock_publish
+    service = KnowledgeUpdateService(repo, extractor)
+    document = _document()
+
+    with pytest.raises(_PublishConflict):
+        await service.update_knowledge((document,))
+
+    assert not abandon_called
+    staging_id = list(repo._staging.keys())[0]
+    assert repo._staging[staging_id].state == "staged"
+
+
+@pytest.mark.asyncio
+async def test_service_does_not_abandon_on_io_errors() -> None:
+    """临时 IO 错误（如 PyMongoError, TimeoutError）不应该调用 abandon，标 staged 不动。"""
+    from pymongo.errors import PyMongoError
+    repo = InMemoryKnowledgeRepository()
+    extractor = FakeExtractor(_draft)
+
+    abandon_called = False
+    async def mock_abandon(staging_id: str, reason: str):
+        nonlocal abandon_called
+        abandon_called = True
+
+    repo.abandon = mock_abandon
+
+    async def mock_publish(staging_id: str):
+        raise PyMongoError("network timeout")
+
+    repo.publish = mock_publish
+    service = KnowledgeUpdateService(repo, extractor)
+    document = _document()
+
+    with pytest.raises(PyMongoError):
+        await service.update_knowledge((document,))
+
+    assert not abandon_called
+    staging_id = list(repo._staging.keys())[0]
+    assert repo._staging[staging_id].state == "staged"
+
+
+@pytest.mark.asyncio
+async def test_abandon_is_idempotent_and_respects_optimistic_locking() -> None:
+    """如果是已发布或已 abandon 的 staging，重复调用 abandon 应该是幂等的，不会抛错，且不能把 state="published" 覆写为 abandoned。"""
+    repo = InMemoryKnowledgeRepository()
+    extractor = FakeExtractor(_draft)
+    service = KnowledgeUpdateService(repo, extractor)
+    document = _document()
+
+    # 成功发布，状态变为 published
+    await service.update_knowledge((document,))
+    staging_id = list(repo._staging.keys())[0]
+    assert repo._staging[staging_id].state == "published"
+
+    # 再次尝试对其进行 abandon，应该不产生任何改变
+    await repo.abandon(staging_id, "later failure")
+    assert repo._staging[staging_id].state == "published"
