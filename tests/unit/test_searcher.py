@@ -34,10 +34,10 @@ from src.dao.emb.searcher import (
     search_by_name,
 )
 
-
 # ---------------------------------------------------------------------------
 # _esc
 # ---------------------------------------------------------------------------
+
 
 class TestEsc:
     def test_plain_string(self):
@@ -58,6 +58,7 @@ class TestEsc:
 # ---------------------------------------------------------------------------
 # _build_filter
 # ---------------------------------------------------------------------------
+
 
 class TestBuildFilter:
     def test_no_constraints_returns_none(self):
@@ -80,7 +81,7 @@ class TestBuildFilter:
         q = SearchQuery(text="x", namespace="ns")
         f = _build_filter(q)
         assert f"{FIELD_DEPRECATED} = false" in f
-        assert f" AND " in f
+        assert " AND " in f
 
     def test_include_deprecated_omits_filter(self):
         q = SearchQuery(text="x", namespace="ns", include_deprecated=True)
@@ -112,6 +113,7 @@ class TestBuildFilter:
 # rrf
 # ---------------------------------------------------------------------------
 
+
 class TestRRF:
     def test_empty_input(self):
         assert rrf([]) == []
@@ -132,14 +134,14 @@ class TestRRF:
         # b 出现在两个 list 里 → score 累加 → 排第一
         assert [r.doc_id for r in out] == ["b", "a", "c"]
         # b: 1/(60+2) + 1/(60+1) = 1/62 + 1/61
-        assert out[0].score == pytest.approx(1/62 + 1/61)
+        assert out[0].score == pytest.approx(1 / 62 + 1 / 61)
 
     def test_uses_dedicated_k(self):
         a = [SearchResult(doc_id="a", score=0.9)]
         b = [SearchResult(doc_id="a", score=0.9)]
         # k=10, rank 1
         out = rrf([a, b], k=10)
-        assert out[0].score == pytest.approx(2 * 1/11)
+        assert out[0].score == pytest.approx(2 * 1 / 11)
 
     def test_preserves_fields_from_first_occurrence(self):
         a = [SearchResult(doc_id="a", score=0.9, fields={"name": "from-a"})]
@@ -170,9 +172,11 @@ class TestRRF:
 # search_by_name / search —— 假 Collection + 假 Embedder
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class FakeDoc:
     """长得像 zvec 返回 doc 的对象。"""
+
     id: str
     score: float = 0.0
     fields: dict = None  # type: ignore[assignment]
@@ -192,11 +196,13 @@ class FakeCollection:
         self.query_table = query_table or {}
 
     def query(self, *, filter=None, queries=None, topk=None, **_):
-        self.query_calls.append({
-            "filter": filter,
-            "queries": queries,
-            "topk": topk,
-        })
+        self.query_calls.append(
+            {
+                "filter": filter,
+                "queries": queries,
+                "topk": topk,
+            }
+        )
         # 按 filter 决定返回
         if filter is not None and queries is None:
             return self.query_table.get(("filter", filter), [])
@@ -231,20 +237,25 @@ class FakeEmbedder:
 # search_by_name
 # ---------------------------------------------------------------------------
 
+
 class TestSearchByName:
     def test_returns_empty_for_non_identifier(self):
         coll = FakeCollection()
-        assert search_by_name(coll, "has space") == []
-        assert search_by_name(coll, "") == []
-        assert search_by_name(coll, "weird!char") == []
+        assert search_by_name(coll, SearchQuery(text="has space")) == []
+        assert search_by_name(coll, SearchQuery(text="")) == []
+        assert search_by_name(coll, SearchQuery(text="weird!char")) == []
 
     def test_name_match_returns_results(self):
-        coll = FakeCollection(query_table={
-            ("filter", f"{FIELD_NAME} = 'DataStoreBarrier'"): [
-                FakeDoc(id="ns.op.dsb", score=0.9, fields={"name": "DataStoreBarrier"}),
-            ]
-        })
-        results = search_by_name(coll, "DataStoreBarrier", topk=5)
+        q = SearchQuery(text="DataStoreBarrier", namespace="com.huawei.cann", version="v1")
+        flt_expected = f"{FIELD_NAME} = 'DataStoreBarrier' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        coll = FakeCollection(
+            query_table={
+                ("filter", flt_expected): [
+                    FakeDoc(id="ns.op.dsb", score=0.9, fields={"name": "DataStoreBarrier"}),
+                ]
+            }
+        )
+        results = search_by_name(coll, q, topk=5)
         assert len(results) == 1
         assert results[0].doc_id == "ns.op.dsb"
         # 只调了一次 query（name 命中就 return）
@@ -254,13 +265,18 @@ class TestSearchByName:
         # 完整 chunk_id 含点号 → 走不通 name 短路。但 _NAME_LIKE_RE 不允许点号
         # 所以走 search_by_name 直接返回 []。这里用合标识符的 chunk_id
         # 来覆盖 "name 失败 → 试 api_id" 的回退路径。
-        coll = FakeCollection(query_table={
-            ("filter", f"{FIELD_NAME} = 'my_alias'"): [],
-            ("filter", f"{FIELD_API_ID} = 'my_alias'"): [
-                FakeDoc(id="my_alias", score=0.95),
-            ],
-        })
-        results = search_by_name(coll, "my_alias", topk=5)
+        q = SearchQuery(text="my_alias", namespace="com.huawei.cann", version="v1")
+        flt_name = f"{FIELD_NAME} = 'my_alias' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        flt_api_id = f"{FIELD_API_ID} = 'my_alias' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        coll = FakeCollection(
+            query_table={
+                ("filter", flt_name): [],
+                ("filter", flt_api_id): [
+                    FakeDoc(id="my_alias", score=0.95),
+                ],
+            }
+        )
+        results = search_by_name(coll, q, topk=5)
         assert len(results) == 1
         assert results[0].doc_id == "my_alias"
         # 调了两次：name + api_id
@@ -269,18 +285,59 @@ class TestSearchByName:
     def test_dot_in_name_returns_empty_due_to_name_like_regex(self):
         # 实际用法：完整 chunk_id 形如 ns.op.api，_NAME_LIKE_RE 拒绝
         coll = FakeCollection()
-        assert search_by_name(coll, "com.huawei.cann.ascendc.op.910beta3.datastorebarrier") == []
+        assert (
+            search_by_name(
+                coll, SearchQuery(text="com.huawei.cann.ascendc.op.910beta3.datastorebarrier")
+            )
+            == []
+        )
 
     def test_both_miss_returns_empty(self):
         coll = FakeCollection()
-        results = search_by_name(coll, "NoSuchApi", topk=5)
+        q = SearchQuery(text="NoSuchApi", namespace="com.huawei.cann", version="v1")
+        results = search_by_name(coll, q, topk=5)
         assert results == []
         assert len(coll.query_calls) == 2
+
+    def test_search_by_name_isolates_namespaces(self):
+        # 验证在 collection 里有两个 namespace 的同名 API 时，指定不同 namespace 只召回对应的那个
+        flt_a = f"{FIELD_NAME} = 'DataStoreBarrier' AND {FIELD_NAMESPACE} = 'A' AND {FIELD_VERSION} = '1' AND {FIELD_DEPRECATED} = false"
+        flt_b = f"{FIELD_NAME} = 'DataStoreBarrier' AND {FIELD_NAMESPACE} = 'B' AND {FIELD_VERSION} = '2' AND {FIELD_DEPRECATED} = false"
+
+        coll = FakeCollection(
+            query_table={
+                ("filter", flt_a): [
+                    FakeDoc(
+                        id="A.DataStoreBarrier",
+                        score=0.9,
+                        fields={"name": "DataStoreBarrier", "namespace": "A"},
+                    ),
+                ],
+                ("filter", flt_b): [
+                    FakeDoc(
+                        id="B.DataStoreBarrier",
+                        score=0.9,
+                        fields={"name": "DataStoreBarrier", "namespace": "B"},
+                    ),
+                ],
+            }
+        )
+
+        q_a = SearchQuery(text="DataStoreBarrier", namespace="A", version="1")
+        res_a = search_by_name(coll, q_a)
+        assert len(res_a) == 1
+        assert res_a[0].doc_id == "A.DataStoreBarrier"
+
+        q_b = SearchQuery(text="DataStoreBarrier", namespace="B", version="2")
+        res_b = search_by_name(coll, q_b)
+        assert len(res_b) == 1
+        assert res_b[0].doc_id == "B.DataStoreBarrier"
 
 
 # ---------------------------------------------------------------------------
 # search 主流程
 # ---------------------------------------------------------------------------
+
 
 class TestSearch:
     def test_empty_query_raises(self):
@@ -294,13 +351,16 @@ class TestSearch:
 
     def test_short_circuit_when_query_looks_like_name_and_hits(self):
         # 形如 API 标识符 → 先试 search_by_name，命中就跳过 embed
-        coll = FakeCollection(query_table={
-            ("filter", f"{FIELD_NAME} = 'DataStoreBarrier'"): [
-                FakeDoc(id="ns.op.dsb", score=0.99),
-            ]
-        })
+        q = SearchQuery(text="DataStoreBarrier", namespace="com.huawei.cann", version="v1", topk=5)
+        flt_expected = f"{FIELD_NAME} = 'DataStoreBarrier' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        coll = FakeCollection(
+            query_table={
+                ("filter", flt_expected): [
+                    FakeDoc(id="ns.op.dsb", score=0.99),
+                ]
+            }
+        )
         emb = FakeEmbedder()
-        q = SearchQuery(text="DataStoreBarrier", topk=5)
         results = search(coll, q, emb)
         assert results[0].doc_id == "ns.op.dsb"
         # 没有 embed 调用
@@ -309,20 +369,24 @@ class TestSearch:
 
     def test_short_circuit_miss_falls_through_to_embedding(self):
         # 形如标识符但 name 没命中 → 退化到 embedding 召回
-        coll = FakeCollection(query_table={
-            ("filter", f"{FIELD_NAME} = 'NoSuchApi'"): [],
-            ("filter", f"{FIELD_API_ID} = 'NoSuchApi'"): [],
-            ("vec", "dense_embedding"): [
-                FakeDoc(id="a", score=0.8),
-                FakeDoc(id="b", score=0.5),
-            ],
-            ("vec", "sparse_embedding"): [
-                FakeDoc(id="b", score=0.6),
-                FakeDoc(id="c", score=0.3),
-            ],
-        })
+        q = SearchQuery(text="NoSuchApi", namespace="com.huawei.cann", version="v1", topk=3)
+        flt_name = f"{FIELD_NAME} = 'NoSuchApi' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        flt_api_id = f"{FIELD_API_ID} = 'NoSuchApi' AND {FIELD_NAMESPACE} = 'com.huawei.cann' AND {FIELD_VERSION} = 'v1' AND {FIELD_DEPRECATED} = false"
+        coll = FakeCollection(
+            query_table={
+                ("filter", flt_name): [],
+                ("filter", flt_api_id): [],
+                ("vec", "dense_embedding"): [
+                    FakeDoc(id="a", score=0.8),
+                    FakeDoc(id="b", score=0.5),
+                ],
+                ("vec", "sparse_embedding"): [
+                    FakeDoc(id="b", score=0.6),
+                    FakeDoc(id="c", score=0.3),
+                ],
+            }
+        )
         emb = FakeEmbedder()
-        q = SearchQuery(text="NoSuchApi", topk=3)
         results = search(coll, q, emb)
         # 短路两次 + dense + sparse = 4 次 query
         assert len(coll.query_calls) == 4
@@ -336,10 +400,12 @@ class TestSearch:
 
     def test_non_identifier_query_skips_short_circuit(self):
         # 多个词 → 不走短路
-        coll = FakeCollection(query_table={
-            ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
-            ("vec", "sparse_embedding"): [FakeDoc(id="b", score=0.4)],
-        })
+        coll = FakeCollection(
+            query_table={
+                ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
+                ("vec", "sparse_embedding"): [FakeDoc(id="b", score=0.4)],
+            }
+        )
         emb = FakeEmbedder()
         q = SearchQuery(text="数据同步 barrier", topk=3)
         results = search(coll, q, emb)
@@ -349,10 +415,12 @@ class TestSearch:
 
     def test_filter_passed_to_both_recalls(self):
         # 用空格分词的多词 query → 不触发短路，直接走到 dense + sparse
-        coll = FakeCollection(query_table={
-            ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
-            ("vec", "sparse_embedding"): [],
-        })
+        coll = FakeCollection(
+            query_table={
+                ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
+                ("vec", "sparse_embedding"): [],
+            }
+        )
         emb = FakeEmbedder()
         q = SearchQuery(text="hello world", namespace="ns.op", version="v1", topk=3)
         search(coll, q, emb)
@@ -364,10 +432,12 @@ class TestSearch:
 
     def test_no_filter_when_no_constraints(self):
         # 多词 query → 直接走到双路召回，filter 应为 None
-        coll = FakeCollection(query_table={
-            ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
-            ("vec", "sparse_embedding"): [],
-        })
+        coll = FakeCollection(
+            query_table={
+                ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
+                ("vec", "sparse_embedding"): [],
+            }
+        )
         emb = FakeEmbedder()
         q = SearchQuery(text="hello world", topk=3, include_deprecated=True)
         search(coll, q, emb)
@@ -377,44 +447,46 @@ class TestSearch:
     def test_dense_embed_failure_raises_search_error(self):
         coll = FakeCollection()
         emb = FakeEmbedder(dense_exc=RuntimeError("net"))
-        q = SearchQuery(text="hello", topk=3)  # 非 identifier → 不走短路
+        q = SearchQuery(
+            text="hello", namespace="com.huawei.cann", version="v1", topk=3
+        )  # 非 identifier? 实际上是 identifier，通过补全 scope 来验证 fallback
         with pytest.raises(SearchError) as exc:
             search(coll, q, emb)
         assert "query embed 失败" in str(exc.value)
 
     def test_sparse_recall_failure_raises_search_error(self):
-        coll = FakeCollection(query_table={
-            ("vec", "dense_embedding"): [FakeDoc(id="a", score=0.7)],
-            # sparse 这条没配置 → FakeCollection.query 返回 []，不报错
-            # 改成抛异常需要更精细的 fake
-        })
         emb = FakeEmbedder()
 
         class BoomCollection(FakeCollection):
             def query(self, **kw):
                 self.query_calls.append(kw)
-                if kw.get("queries") and getattr(kw["queries"], "field_name", "") == "sparse_embedding":
+                if (
+                    kw.get("queries")
+                    and getattr(kw["queries"], "field_name", "") == "sparse_embedding"
+                ):
                     raise RuntimeError("zvec boom")
                 return []
 
-        q = SearchQuery(text="hello", topk=3)
+        q = SearchQuery(text="hello", namespace="com.huawei.cann", version="v1", topk=3)
         with pytest.raises(SearchError) as exc:
             search(BoomCollection(), q, emb)
         assert "sparse 召回失败" in str(exc.value)
 
     def test_uses_rrf_to_merge(self):
-        coll = FakeCollection(query_table={
-            ("vec", "dense_embedding"): [
-                FakeDoc(id="x", score=0.9),
-                FakeDoc(id="y", score=0.5),
-            ],
-            ("vec", "sparse_embedding"): [
-                FakeDoc(id="y", score=0.6),
-                FakeDoc(id="z", score=0.4),
-            ],
-        })
+        coll = FakeCollection(
+            query_table={
+                ("vec", "dense_embedding"): [
+                    FakeDoc(id="x", score=0.9),
+                    FakeDoc(id="y", score=0.5),
+                ],
+                ("vec", "sparse_embedding"): [
+                    FakeDoc(id="y", score=0.6),
+                    FakeDoc(id="z", score=0.4),
+                ],
+            }
+        )
         emb = FakeEmbedder()
-        q = SearchQuery(text="hello", topk=3)
+        q = SearchQuery(text="hello", namespace="com.huawei.cann", version="v1", topk=3)
         results = search(coll, q, emb)
         # 3 个 doc：x, y, z
         doc_ids = [r.doc_id for r in results]

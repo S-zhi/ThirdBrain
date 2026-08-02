@@ -1,4 +1,5 @@
 """_to_results 单元测试（覆盖 zvec 不同返回结构的兜底）。"""
+
 from types import SimpleNamespace
 
 from src.dao.emb.searcher import _to_results
@@ -6,6 +7,7 @@ from src.dao.emb.searcher import _to_results
 
 class FakeDoc:
     """模拟 zvec 返回的 Doc-like 对象（属性访问）。"""
+
     def __init__(self, id, fields, score=0.5):
         self.id = id
         self.fields = fields
@@ -93,10 +95,13 @@ class TestSearchByNameHeuristics:
             def query(self, **kwargs):
                 called_with.append(kwargs)
                 # 模拟 zvec 返回：单条结果
+                from typing import ClassVar
+
                 class FakeDoc:
-                    id = "matched"
-                    fields = {"name": "foo"}
-                    score = 0.0
+                    id: ClassVar[str] = "matched"
+                    fields: ClassVar[dict] = {"name": "foo"}
+                    score: ClassVar[float] = 0.0
+
                 return [FakeDoc()]
 
         class FakeEmb:
@@ -107,9 +112,10 @@ class TestSearchByNameHeuristics:
                 raise AssertionError("embed 不该被调，因为短路已经命中")
 
         from src.dao.emb.searcher import search
+
         results = search(
             FakeColl(),
-            SearchQuery(text="foo"),  # 像 identifier
+            SearchQuery(text="foo", namespace="com.huawei.cann", version="v1"),  # 像 identifier
             FakeEmb(),
         )
         assert len(results) == 1

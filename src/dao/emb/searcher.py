@@ -52,6 +52,7 @@ def _esc(s: str) -> str:
 # Dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SearchQuery:
     """用户的一次检索意图。
@@ -66,11 +67,12 @@ class SearchQuery:
       真要看弃用 API 时才传 True。
     - ``topk``: 单路召回 top-K；RRF 融合后仍是 K 条（不算两路之和）。
     """
+
     text: str
-    namespace: str | None = None        # 限定命名空间（architecture §11.2 强制要求）
-    version: str | None = None          # 限定版本
-    language: str | None = None         # 限定语言
-    include_deprecated: bool = False    # 默认排除弃用
+    namespace: str | None = None  # 限定命名空间（architecture §11.2 强制要求）
+    version: str | None = None  # 限定版本
+    language: str | None = None  # 限定语言
+    include_deprecated: bool = False  # 默认排除弃用
     topk: int = 10
 
 
@@ -82,6 +84,7 @@ class SearchResult:
     - ``score``: RRF 融合后的分数（dense + sparse 累加），**不是**原始余弦距离。
     - ``fields``: doc 的 fields 字典（**已展开**为普通 dict）。
     """
+
     doc_id: str
     score: float
     fields: dict[str, Any] = field(default_factory=dict)
@@ -90,6 +93,7 @@ class SearchResult:
 # ---------------------------------------------------------------------------
 # 过滤字符串构造
 # ---------------------------------------------------------------------------
+
 
 def _build_filter(q: SearchQuery) -> str | None:
     """根据 :class:`SearchQuery` 拼出 Zvec filter 字符串。
@@ -136,6 +140,7 @@ def _join_filters(*parts: str | None) -> str:
 # ---------------------------------------------------------------------------
 # RRF（纯函数，从 searcher 里独立出来方便单测）
 # ---------------------------------------------------------------------------
+
 
 def rrf(
     results_lists: list[list[SearchResult]],
@@ -186,12 +191,13 @@ def rrf(
 # 检索主函数
 # ---------------------------------------------------------------------------
 
+
 def search_by_name(
     coll: zvec.Collection,
-    name: str,
-    topk: int = 10,
+    query: SearchQuery,
+    topk: int | None = None,
 ) -> list[SearchResult]:
-    """短路精确匹配：先 ``name = name``，失败再 ``api_id = name``。
+    """短路精确匹配：先 ``name``，失败再 ``api_id``，全程强制 scope。
 
     适用：用户输入形如 ``"DataStoreBarrier"``（函数名）或完整 chunk_id
     ``"com.huawei.cann.ascendc.op.910beta3.datastorebarrier"``。
@@ -199,24 +205,36 @@ def search_by_name(
     行为：
     - 输入先过 :data:`_NAME_LIKE_RE`（"看着像 identifier"）和 :data:`_HAS_SPACE_RE`
       启发式；不像就**直接返空**（**不**退化到 embedding 召回，避免误命中）。
-    - 第一轮按 ``name`` 精确查；命中即返回（最多 ``topk`` 条）。
-    - 第二轮按 ``api_id`` 精确查；命中返回。
+    - 强制校验 namespace 与 version 范围。
+    - 第一轮在强制版本范围内按 ``name`` 精确查；命中即返回（最多 ``topk`` 条）。
+    - 第二轮在强制版本范围内按 ``api_id`` 精确查；命中返回。
     - 两轮都没命中 → 返空（让 caller 决定是否退化）。
 
     Returns:
         精确匹配结果（可能为空），**不**做排序（zvec 按索引自然顺序）。
     """
+    if not query.text or not query.text.strip():
+        return []
+
+    name = query.text.strip()
     if not _NAME_LIKE_RE.match(name) or _HAS_SPACE_RE.search(name):
         return []
 
+    _require_versioned_scope(query)
+    flt_scope = _build_filter(query)
+    if topk is None:
+        topk = query.topk
+
     # 先试 name
-    raw = coll.query(filter=f"{FIELD_NAME} = '{_esc(name)}'", topk=topk)
+    flt_name = _join_filters(f"{FIELD_NAME} = '{_esc(name)}'", flt_scope)
+    raw = coll.query(filter=flt_name, topk=topk)
     res = _to_results(raw)
     if res:
         return res
 
     # 再试 api_id（用户可能输入完整 chunk_id）
-    raw = coll.query(filter=f"{FIELD_API_ID} = '{_esc(name)}'", topk=topk)
+    flt_api_id = _join_filters(f"{FIELD_API_ID} = '{_esc(name)}'", flt_scope)
+    raw = coll.query(filter=flt_api_id, topk=topk)
     return _to_results(raw)
 
 
@@ -298,7 +316,7 @@ def search(
 
     # 短路：query 像精确 API 名 → 先试 search_by_name，命中就直接返回
     if _NAME_LIKE_RE.match(query.text) and not _HAS_SPACE_RE.search(query.text):
-        by_name = search_by_name(coll, query.text, topk=query.topk)
+        by_name = search_by_name(coll, query, topk=query.topk)
         if by_name:
             return by_name
         # 短路没命中（比如 chunk_id 是大写、用户输入小写），
@@ -350,6 +368,7 @@ def search(
 # Zvec 返回值 → SearchResult 转换
 # ---------------------------------------------------------------------------
 
+
 def _to_results(raw: Any) -> list[SearchResult]:
     """把 zvec 的 query 返回值（list of Doc-like）转成 :class:`SearchResult` 列表。
 
@@ -396,9 +415,11 @@ def _to_results(raw: Any) -> list[SearchResult]:
             inner = next(iter(fields.values()))
             fields = inner.get("fields", inner) if isinstance(inner, dict) else {}
 
-        out.append(SearchResult(
-            doc_id=str(doc_id),
-            score=float(score),
-            fields=dict(fields),
-        ))
+        out.append(
+            SearchResult(
+                doc_id=str(doc_id),
+                score=float(score),
+                fields=dict(fields),
+            )
+        )
     return out

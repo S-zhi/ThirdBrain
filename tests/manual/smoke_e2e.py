@@ -154,7 +154,15 @@ def main():
 
     # Test 1: exact name match (short-circuit)
     print("\n  Test 1: search_by_name('DataStoreBarrier')")
-    results = search_by_name(coll, "DataStoreBarrier", topk=5)
+    results = search_by_name(
+        coll,
+        SearchQuery(
+            text="DataStoreBarrier",
+            namespace="com.huawei.cann.ascendc.op.910beta3",
+            version="910beta3",
+        ),
+        topk=5,
+    )
     for r in results:
         print(f"    [{r.score:.4f}] {r.doc_id} :: {r.fields.get('api_name', '')[:40]}")
     assert any(r.doc_id == "com.huawei.cann.ascendc.op.910beta3.datastorebarrier" for r in results), \
