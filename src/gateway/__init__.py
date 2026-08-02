@@ -3,6 +3,7 @@
 from src.gateway.knowledge_query_router import router as knowledge_query_router
 from src.gateway.knowledge_update_router import router as knowledge_update_router
 from src.gateway.rag_construction_router import router as rag_construction_router
+from src.gateway.retrieval_router import router as retrieval_router
 from src.gateway.router import router as gateway_router
 from src.gateway.yaml_import_router import router as yaml_import_router
 
@@ -11,5 +12,6 @@ __all__ = [
     "knowledge_query_router",
     "knowledge_update_router",
     "rag_construction_router",
+    "retrieval_router",
     "yaml_import_router",
 ]

@@ -16,6 +16,7 @@ from src.gateway import (
     knowledge_query_router,
     knowledge_update_router,
     rag_construction_router,
+    retrieval_router,
     yaml_import_router,
 )
 from src.knowledge import (
@@ -25,6 +26,11 @@ from src.knowledge import (
 )
 from src.knowledge.mongo_repository import MongoKnowledgeRepository
 from src.knowledge.query_service import build_knowledge_query_service
+from src.retrieve import (
+    KnowledgeUpdateServiceScheduler,
+    RagSourceReader,
+    RetrievalPipelineService,
+)
 from src.service import (
     YamlImportService,
     build_agent_query_service,
@@ -116,6 +122,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.knowledge_update_disabled_reason = disabled_reason
         if disabled_reason:
             logger.warning("knowledge_update.disabled reason=%s", disabled_reason)
+        update_scheduler = (
+            KnowledgeUpdateServiceScheduler(app.state.knowledge_update_service)
+            if app.state.knowledge_update_service is not None
+            else None
+        )
+        app.state.retrieval_pipeline_service = RetrievalPipelineService(
+            app.state.knowledge_query_service,
+            RagSourceReader(collection_name),
+            update_scheduler,
+        )
         app.state.rag_construction_service = build_rag_construction_service()
         yield
     finally:
@@ -139,5 +155,6 @@ app = FastAPI(
 app.include_router(gateway_router)
 app.include_router(knowledge_query_router)
 app.include_router(knowledge_update_router)
+app.include_router(retrieval_router)
 app.include_router(yaml_import_router)
 app.include_router(rag_construction_router)
