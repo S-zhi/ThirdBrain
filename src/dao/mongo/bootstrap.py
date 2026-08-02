@@ -320,12 +320,8 @@ class MongoBootstrap:
         兼容 pymongo 不同版本的返回格式：1.x 返 list of tuple，4.x 返
         SON / OrderedDict；这里统一成 list of tuple 后比较。
         """
-        if a is None or b is None:
-            return a == b
-        # pymongo 1.x / 4.x 返回格式可能略有不同，统一转 list of tuple。
-        a_pairs = [(k, v) for k, v in (a.items() if isinstance(a, dict) else a)]
-        b_pairs = [(k, v) for k, v in (b.items() if isinstance(b, dict) else b)]
-        return a_pairs == b_pairs
+        from src.dao.mongo._index_helper import _index_keys_match as shared_keys_match
+        return shared_keys_match(a, b)
 
     @staticmethod
     def _index_options_match(existing: dict[str, Any], expected: dict[str, Any]) -> bool:

@@ -65,6 +65,7 @@ class MongoKnowledgeRepository:
 
     async def ensure_indexes(self) -> None:
         """创建本模块所需索引；由应用启动装配层显式调用。"""
+        from src.dao.mongo._index_helper import create_index_if_missing
 
         definitions = (
             (
@@ -116,12 +117,9 @@ class MongoKnowledgeRepository:
                 ],
             ),
         )
-        try:
-            for collection, indexes in definitions:
-                for keys, name in indexes:
-                    await collection.create_index(keys, name=name)
-        except PyMongoError as error:
-            raise remap_pymongo_error(error) from error
+        for collection, indexes in definitions:
+            for keys, name in indexes:
+                await create_index_if_missing(collection, keys, name=name)
 
     async def get_source_state(
         self,
