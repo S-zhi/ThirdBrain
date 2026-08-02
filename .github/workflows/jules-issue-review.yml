@@ -1,0 +1,141 @@
+name: Jules Issue Review & Guidance
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  jules-review:
+    # 仅当 Issue 打上了 'jules-review' 标签时触发
+    # 对于 issue_comment 事件，判断对应 issue 是否包含 jules-review 标签
+    if: >-
+      (github.event_name == 'issues' && github.event.label.name == 'jules-review') ||
+      (github.event_name == 'issue_comment' && contains(github.event.issue.labels.*.name, 'jules-review') && github.event.comment.user.login != 'github-actions[bot]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Fetch Issue Context & Comments
+        id: prepare_context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "=== Fetching Issue Details & Comments ==="
+          # 获取 Issue 标题和正文
+          TITLE=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.title')
+          BODY=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.body')
+          
+          # 获取 Issue 下所有非 Bot 评论内容
+          COMMENTS=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" \
+            --jq '[.[] | select(.user.type != "Bot")] | map("- " + .user.login + ": " + .body) | join("\n")')
+
+          # 导出为环境变量
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          
+          echo "ISSUE_TITLE=$TITLE" >> $GITHUB_ENV
+          
+          echo "ISSUE_BODY<<$EOF" >> $GITHUB_ENV
+          echo "$BODY" >> $GITHUB_ENV
+          echo "$EOF" >> $GITHUB_ENV
+          
+          echo "ISSUE_COMMENTS<<$EOF" >> $GITHUB_ENV
+          echo "$COMMENTS" >> $GITHUB_ENV
+          echo "$EOF" >> $GITHUB_ENV
+          
+          if [ -n "$COMMENTS" ]; then
+            echo "HAS_COMMENTS=true" >> $GITHUB_ENV
+          else
+            echo "HAS_COMMENTS=false" >> $GITHUB_ENV
+          fi
+
+      - name: Build Prompt Payload
+        id: build_prompt
+        run: |
+          python3 -c "
+          import os, json
+
+          title = os.environ.get('ISSUE_TITLE', '')
+          body = os.environ.get('ISSUE_BODY', '')
+          comments = os.environ.get('ISSUE_COMMENTS', '')
+          has_comments = os.environ.get('HAS_COMMENTS', 'false') == 'true'
+
+          if has_comments:
+              prompt_text = f'''
+          你是一个专业的高级代码 Agent。请针对以下 GitHub Issue 的最新讨论和用户评论进行详细答疑与指导。
+
+          【Issue 标题】: {title}
+
+          【Issue 原始需求/描述】:
+          {body}
+
+          【用户追加的补充评论/疑问】:
+          {comments}
+
+          【任务要求】:
+          1. 优先针对用户在评论中提出的具体疑惑、不理解的代码模块或操作要求进行针对性解答和指导。
+          2. 分析用户提出的疑问与现有代码库架构的关联，给出具体可行的代码改进思路或修复方案。
+          3. 如果用户在评论中给出了具体的指导操作，严格按照用户的指令进行评估和细化。
+          4. 请输出结构清晰、易读的 Markdown 格式报告。
+
+          【重要限制】:
+          - 请勿直接修改仓库代码。
+          - 请勿创建分支或 Pull Request。
+          - 仅以回复/评审建议的形式输出结果。
+          '''
+          else:
+              prompt_text = f'''
+          你是一个专业的高级代码 Agent。请对以下 GitHub Issue 进行全面且严谨的可行性评审。
+
+          【Issue 标题】: {title}
+
+          【Issue 需求描述】:
+          {body}
+
+          【任务要求】:
+          1. 分析此 Issue 描述的需求是否清晰、合理、可实现。
+          2. 评估实现难度、潜在风险、以及是否与现有代码架构存在冲突。
+          3. 给出明确的可行性结论（推荐实施 / 不推荐实施 / 需补充需求细节）。
+          4. 若推荐实施，简要列出架构设计思路、模块拆分建议及实现步骤。
+          5. 请输出结构清晰、专业的 Markdown 格式报告。
+
+          【重要限制】:
+          - 请勿直接修改仓库代码。
+          - 请勿创建分支或 Pull Request。
+          - 仅以评审建议的形式输出结果。
+          '''
+
+          payload = {
+              'prompt': prompt_text.strip(),
+              'requirePlanApproval': False,
+              'automationMode': 'NONE'
+          }
+
+          with open('jules_payload.json', 'w', encoding='utf-8') as f:
+              json.dump(payload, f, ensure_ascii=False, indent=2)
+          "
+
+      - name: Call Jules Remote API
+        id: call_jules
+        env:
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+        run: |
+          echo "=== Executing Jules API Call ==="
+          
+          if [ -n "$JULES_API_KEY" ]; then
+            RESPONSE=$(curl -s -X POST 'https://jules.googleapis.com/v1alpha/sessions' \
+              -H "Content-Type: application/json" \
+              -H "X-Goog-Api-Key: ${JULES_API_KEY}" \
+              -d @jules_payload.json)
+            echo "API Response: $RESPONSE"
+          else
+            echo "::warning::secrets.JULES_API_KEY 未配置，跳过 Jules API 调用。"
+          fi
