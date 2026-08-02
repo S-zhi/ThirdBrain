@@ -64,10 +64,25 @@ class TestToResults:
     def test_fetch_style_dict_of_dicts(self):
         # zvec fetch 返回 ``{"doc_id": {"id": ..., "fields": {...}}}`` 格式
         raw = {"doc1": {"id": "doc1", "fields": {"x": 1}}}
-        results = _to_results([raw])
-        # 这个情况是 fetch 而不是 query，结果已经是 dict-of-id
-        # 我们的转换应该能识别
-        assert len(results) >= 0  # 不会崩
+        results = _to_results(raw)
+        assert len(results) == 1
+        assert results[0].doc_id == "doc1"
+        assert results[0].fields == {"x": 1}
+
+    def test_single_field_doc_fields_not_misidentified(self):
+        # 验证单字段且值为 dict 的 doc 字段不会被错误识别
+        raw = [{"id": "1", "fields": {"only_key": {"nested": "data"}}}]
+        results = _to_results(raw)
+        assert len(results) == 1
+        assert results[0].doc_id == "1"
+        assert results[0].fields == {"only_key": {"nested": "data"}}
+
+    def test_empty_fields_preserved(self):
+        raw = [{"id": "1", "fields": {}}]
+        results = _to_results(raw)
+        assert len(results) == 1
+        assert results[0].doc_id == "1"
+        assert results[0].fields == {}
 
     def test_mixed_types(self):
         mixed = [
