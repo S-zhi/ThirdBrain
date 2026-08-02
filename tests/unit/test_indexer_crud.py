@@ -440,6 +440,15 @@ class TestFetch:
         assert d.id == "a"
         assert d.fields["name"] == "a"
 
+    def test_fetch_existing_exclude_vector(self, collection):
+        collection.upsert(make_doc("a"))
+        d = fetch_doc(collection, "a", include_vector=False)
+        assert d is not None
+        assert d.id == "a"
+        assert d.fields["name"] == "a"
+        # 验证没有返回 vector 数据以省 IO
+        assert not getattr(d, "vectors", None) or len(d.vectors) == 0
+
     def test_fetch_missing_returns_none(self, collection):
         assert fetch_doc(collection, "nope") is None
 
@@ -449,6 +458,15 @@ class TestFetch:
         result = fetch_batch(collection, ["x", "y", "missing", "z"])
         # missing 的 id 静默忽略
         assert set(result.keys()) == {"x", "y", "z"}
+
+    def test_fetch_batch_exclude_vector(self, collection):
+        for did in ["x", "y"]:
+            collection.upsert(make_doc(did))
+        result = fetch_batch(collection, ["x", "y"], include_vector=False)
+        assert set(result.keys()) == {"x", "y"}
+        for d in result.values():
+            # 验证批量 fetch 时不带 vector 以省 IO
+            assert not getattr(d, "vectors", None) or len(d.vectors) == 0
 
     def test_fetch_batch_empty(self, collection):
         assert fetch_batch(collection, []) == {}

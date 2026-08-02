@@ -3,6 +3,9 @@ import os
 from pathlib import Path
 
 import pytest
+import zvec
+
+import config as cfg_mod
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,8 +22,6 @@ def isolated_config(tmp_path, monkeypatch):
     关键：fixture 末尾预加载到 singleton，让 ``get_config()`` 直接拿到测试值，
     不用每个测试调 ``get_config(yaml_path)``。
     """
-    import config as cfg_mod  # 局部 import，monkeypatch.setenv 先于它
-
     yaml_path = tmp_path / "config.yaml"
     yaml_template = """\
 embedder:
@@ -55,3 +56,55 @@ api_name:
     cfg_mod.get_config(yaml_path)  # get_config 会 set singleton，load_config 不会
     yield yaml_path
     cfg_mod.reset_config()
+
+
+@pytest.fixture
+def use_tmp_config(isolated_config):
+    return isolated_config
+
+
+@pytest.fixture
+def tmp_config(isolated_config):
+    return isolated_config
+
+
+@pytest.fixture
+def make_zvec_doc():
+    from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
+
+    def _make(doc_id="ns.op.test", **overrides):
+        c = cfg_mod.get_config()
+        if c.embedder.type == "bailian":
+            dim = c.embedder.bailian.dimension
+        else:
+            dim = c.embedder.local.dimension
+
+        fields = {
+            "namespace": "com.test.v1",
+            "api_id": f"com.test.v1.{doc_id}",
+            "name": "Test",
+            "api_name": f"Test {doc_id}",
+            "version": "v1",
+            "kind": "function",
+            "language": "python",
+            "version_support": ["linux"],
+            "deprecated": False,
+            "ingested_at": 1720000000,
+            "description": f"desc {doc_id}",
+            "signature": f"{doc_id}()",
+            "parameters_md": "",
+            "returns_json": "null",
+            "examples": [],
+            "source_markdown": f"# {doc_id}",
+            "deprecation_note": "",
+        }
+        fields.update(overrides)
+        return zvec.Doc(
+            id=doc_id,
+            fields=fields,
+            vectors={
+                FIELD_DENSE_EMBEDDING: [0.1] * dim,
+                FIELD_SPARSE_EMBEDDING: {1: 0.5, 2: 0.3},
+            },
+        )
+    return _make

@@ -504,8 +504,13 @@ def delete_batch(coll: zvec.Collection, doc_ids: Iterable[str]) -> dict:
 # 读操作：fetch / count / list_ids
 # ---------------------------------------------------------------------------
 
-def fetch_doc(coll: zvec.Collection, doc_id: str) -> Any:
+def fetch_doc(coll: zvec.Collection, doc_id: str, *, include_vector: bool = True) -> Any:
     """按 id 查单条 doc（直接 lookup，无搜索/打分，无向量距离计算）。
+
+    Args:
+        coll: 已打开的 zvec.Collection。
+        doc_id: 要查的 doc id。
+        include_vector: 是否包含 vectors（默认 True，展示/验证用 False 省 IO）。
 
     Returns:
         zvec 0.6 返回的是 **Doc-like 对象**（带 ``.id`` / ``.fields`` /
@@ -515,15 +520,25 @@ def fetch_doc(coll: zvec.Collection, doc_id: str) -> Any:
         - 用 ``doc.fields["xxx"]`` 或 ``getattr(doc, "xxx", default)``；
         - **不要**当 dict 用（``doc["namespace"]`` 会爆）。
     """
-    raw = coll.fetch(ids=doc_id, include_vector=True)
+    raw = coll.fetch(ids=doc_id, include_vector=include_vector)
     if not raw:
         return None
     # zvec 0.6 fetch 返回 dict[str, Doc-like]
     return raw.get(doc_id)
 
 
-def fetch_batch(coll: zvec.Collection, doc_ids: Iterable[str]) -> dict[str, Any]:
+def fetch_batch(
+    coll: zvec.Collection,
+    doc_ids: Iterable[str],
+    *,
+    include_vector: bool = True,
+) -> dict[str, Any]:
     """批量 fetch。返回 ``{doc_id: Doc-like}``，不存在的 id 静默忽略（Zvec 语义）。
+
+    Args:
+        coll: 已打开的 zvec.Collection。
+        doc_ids: 要查的 doc id 列表。
+        include_vector: 是否包含 vectors（默认 True，验证存在性时可传 False）。
 
     提示：如果 ``doc_ids`` 很长，分批传（建议每批 ≤ 1000）以免一次性 IO 太大；
     zvec 0.6 对超长 id list 行为未定义。
@@ -531,7 +546,7 @@ def fetch_batch(coll: zvec.Collection, doc_ids: Iterable[str]) -> dict[str, Any]
     ids = list(doc_ids)
     if not ids:
         return {}
-    return dict(coll.fetch(ids=ids, include_vector=True))
+    return dict(coll.fetch(ids=ids, include_vector=include_vector))
 
 
 def count_docs(coll: zvec.Collection) -> int:

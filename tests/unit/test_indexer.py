@@ -28,6 +28,8 @@ from src.dao.emb.indexer import (
     open_or_create_collection,
     insert_batch,
     insert_doc,
+    fetch_doc,
+    fetch_batch,
 )
 from src.dao.emb.schema import (
     FIELD_DENSE_EMBEDDING,
@@ -312,11 +314,13 @@ class TestOpenOrCreate:
     def test_existing_path_opens(self, use_tmp_config, tmp_path, monkeypatch):
         from dataclasses import replace
         import config
+        from src.dao.emb.schema import get_collection_schema
         # 模拟已有 collection 目录
-        existing = tmp_path / "zvec" / "unit_test"
-        existing.mkdir(parents=True)
+        existing = Path(collection_path())
+        existing.mkdir(parents=True, exist_ok=True)
         # 让 zvec.open 返回一个假对象
         fake_coll = MagicMock()
+        fake_coll.schema = get_collection_schema()
         with patch("src.dao.emb.indexer.zvec.open", return_value=fake_coll) as mock_open:
             coll = open_or_create_collection()
         assert coll is fake_coll
@@ -328,8 +332,8 @@ class TestOpenOrCreate:
     def test_existing_path_but_open_fails(self, use_tmp_config, tmp_path):
         from dataclasses import replace
         import config
-        existing = tmp_path / "zvec" / "unit_test"
-        existing.mkdir(parents=True)
+        existing = Path(collection_path())
+        existing.mkdir(parents=True, exist_ok=True)
         with patch("src.dao.emb.indexer.zvec.open", side_effect=RuntimeError("corrupted")):
             with pytest.raises(CollectionNotFoundError) as exc:
                 open_or_create_collection()
@@ -341,3 +345,37 @@ class TestOpenOrCreate:
             coll = open_or_create_collection()
         assert coll is fake_coll
         mock_create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# fetch_doc / fetch_batch mock unit tests
+# ---------------------------------------------------------------------------
+
+class TestFetchMock:
+    def test_fetch_doc_include_vector_default(self):
+        coll = MagicMock()
+        coll.fetch.return_value = {"id1": "fake_doc"}
+        res = fetch_doc(coll, "id1")
+        assert res == "fake_doc"
+        coll.fetch.assert_called_once_with(ids="id1", include_vector=True)
+
+    def test_fetch_doc_include_vector_false(self):
+        coll = MagicMock()
+        coll.fetch.return_value = {"id1": "fake_doc"}
+        res = fetch_doc(coll, "id1", include_vector=False)
+        assert res == "fake_doc"
+        coll.fetch.assert_called_once_with(ids="id1", include_vector=False)
+
+    def test_fetch_batch_include_vector_default(self):
+        coll = MagicMock()
+        coll.fetch.return_value = {"id1": "fake_doc"}
+        res = fetch_batch(coll, ["id1"])
+        assert res == {"id1": "fake_doc"}
+        coll.fetch.assert_called_once_with(ids=["id1"], include_vector=True)
+
+    def test_fetch_batch_include_vector_false(self):
+        coll = MagicMock()
+        coll.fetch.return_value = {"id1": "fake_doc"}
+        res = fetch_batch(coll, ["id1"], include_vector=False)
+        assert res == {"id1": "fake_doc"}
+        coll.fetch.assert_called_once_with(ids=["id1"], include_vector=False)
