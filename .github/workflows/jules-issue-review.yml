@@ -130,31 +130,44 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
-          echo "=== Executing Jules API Call ==="
-          
-          if [ -n "$JULES_API_KEY" ]; then
-            RESPONSE=$(curl -s -X POST 'https://jules.googleapis.com/v1alpha/sessions' \
-              -H "Content-Type: application/json" \
-              -H "X-Goog-Api-Key: ${JULES_API_KEY}" \
-              -d @jules_payload.json)
-            echo "API Response: $RESPONSE"
-            
-            SESSION_NAME=$(python3 -c "import json; data=json.loads('''$RESPONSE'''); print(data.get('name', ''))" 2>/dev/null || true)
-            
-            if [ -n "$SESSION_NAME" ]; then
-              gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body "🤖 **Jules Agent 已响应并启动分析**
+          python3 -c "
+          import os, subprocess, json, urllib.request
 
-- **Session**: \`${SESSION_NAME}\`
-- **处理状态**: 正在进行深度需求与评论分析...
+          api_key = os.environ.get('JULES_API_KEY', '')
+          issue_num = os.environ.get('ISSUE_NUMBER', '')
+          repo = os.environ.get('REPO', '')
 
-> *提示：Jules 正在云端评估需求可行性与解答评论疑问，结果将在此 Issue 中同步回复。*"
-            else
-              gh issue comment "${ISSUE_NUMBER}" --repo "${REPO}" --body "⚠️ **Jules API 调用收到错误响应**
+          if not api_key:
+              print('::warning::secrets.JULES_API_KEY 未配置，跳过 Jules API 调用。')
+              exit(0)
 
-\`\`\`json
-${RESPONSE}
-\`\`\`"
-            fi
-          else
-            echo "::warning::secrets.JULES_API_KEY 未配置，跳过 Jules API 调用。"
-          fi
+          with open('jules_payload.json', 'rb') as f:
+              payload_data = f.read()
+
+          req = urllib.request.Request(
+              'https://jules.googleapis.com/v1alpha/sessions',
+              data=payload_data,
+              headers={
+                  'Content-Type': 'application/json',
+                  'X-Goog-Api-Key': api_key
+              },
+              method='POST'
+          )
+
+          try:
+              with urllib.request.urlopen(req) as resp:
+                  res_text = resp.read().decode('utf-8')
+                  print(f'API Response: {res_text}')
+                  res_json = json.loads(res_text)
+                  session_name = res_json.get('name', '')
+                  
+                  msg = f'🤖 **Jules Agent 已响应并启动分析**\n\n- **Session**: `{session_name}`\n- **处理状态**: 正在进行深度需求与评论分析...\n\n> *提示：Jules 正在云端评估需求可行性与解答评论疑问，结果将在此 Issue 中同步回复。*'
+          except urllib.error.HTTPError as e:
+              res_text = e.read().decode('utf-8')
+              print(f'API Error: {res_text}')
+              msg = f'⚠️ **Jules API 调用收到错误响应**\n\n```json\n{res_text}\n```'
+          except Exception as e:
+              msg = f'⚠️ **API 请求失败**: {e}'
+
+          subprocess.run(['gh', 'issue', 'comment', issue_num, '--repo', repo, '--body', msg])
+          "
