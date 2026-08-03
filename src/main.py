@@ -172,6 +172,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "mongo_connect_failed reason=%s (running in offline/mock mode)", type(error).__name__
         )
 
+    # ---- Warmup LocalEmbedder if configured ----
+    cfg = get_config()
+    if cfg.embedder.type == "local":
+        try:
+            import asyncio
+            from src.dao.emb.embedder import build_embedder
+            embedder = build_embedder()
+            try:
+                await asyncio.to_thread(lambda: embedder.embed_dense("warmup", mode="query"))
+                logger.info("LocalEmbedder warmup succeeded.")
+            except Exception as warmup_err:
+                logger.warning("LocalEmbedder warmup failed: %s", warmup_err)
+            finally:
+                embedder.close()
+        except Exception as embedder_init_err:
+            logger.warning("LocalEmbedder build failed during warmup: %s", embedder_init_err)
+
     try:
         yield
     finally:

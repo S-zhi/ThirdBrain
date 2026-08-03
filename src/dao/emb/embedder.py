@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 from abc import ABC, abstractmethod
 from collections import Counter
 from typing import Literal
@@ -109,10 +110,11 @@ class TFIDFSparseEncoder:
     VOCAB_SIZE = 1 << VOCAB_BITS  # 16M
 
     def __init__(self) -> None:
-        """初始化空 encoder（df=空、n_docs=0、未 fitted）。"""
+        """初始化空 encoder（df=空、n_docs=0、未 fitted并加锁）。"""
         self._df: Counter[str] = Counter()
         self._n_docs: int = 0
         self._fitted: bool = False
+        self._lock = threading.RLock()  # 防止多线程并发数据竞争与死锁
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
@@ -166,9 +168,10 @@ class TFIDFSparseEncoder:
         流程：逐条 :meth:`update`，最后把 ``_fitted`` 置 True（仅作
         标记位；不影响 :meth:`encode` 行为）。
         """
-        for doc in corpus:
-            self.update(doc)
-        self._fitted = True
+        with self._lock:
+            for doc in corpus:
+                self.update(doc)
+            self._fitted = True
 
     def update(self, text: str) -> None:
         """在线更新：把单个文本的 df 增量进 :attr:`_df`。
@@ -176,9 +179,10 @@ class TFIDFSparseEncoder:
         注意：df 用 ``set(tokens)`` 计算，**同一 doc 里的重复 token 只算 1 次**。
         ``_n_docs`` 始终 ``+= 1``。
         """
-        for token in set(self._tokenize(text)):
-            self._df[token] += 1
-        self._n_docs += 1
+        with self._lock:
+            for token in set(self._tokenize(text)):
+                self._df[token] += 1
+            self._n_docs += 1
 
     def encode(self, text: str) -> dict[int, float]:
         """文本 → 稀疏向量 ``{token_id: weight}``。
@@ -194,33 +198,35 @@ class TFIDFSparseEncoder:
             ``{token_id: weight}``，token_id 是 ``[0, VOCAB_SIZE)`` 的 int，
             weight > 0。
         """
-        tokens = self._tokenize(text)
-        if not tokens:
-            return {}
-        tf = Counter(tokens)
-        n = max(self._n_docs, 1)
-        result: dict[int, float] = {}
-        for token, count in tf.items():
-            df = self._df.get(token, 0)
-            if df == 0:
-                # 未在语料中见过：weight 直接为 0（被跳过）
-                continue
-            idf = math.log(1.0 + n / df)
-            weight = float(count) * idf
-            if weight <= 0:
-                continue
-            token_id = self._token_to_id(token)
-            # 多个 token 撞同一 id 时取 max（信息无损）
-            if token_id in result:
-                result[token_id] = max(result[token_id], weight)
-            else:
-                result[token_id] = weight
-        return result
+        with self._lock:
+            tokens = self._tokenize(text)
+            if not tokens:
+                return {}
+            tf = Counter(tokens)
+            n = max(self._n_docs, 1)
+            result: dict[int, float] = {}
+            for token, count in tf.items():
+                df = self._df.get(token, 0)
+                if df == 0:
+                    # 未在语料中见过：weight 直接为 0（被跳过）
+                    continue
+                idf = math.log(1.0 + n / df)
+                weight = float(count) * idf
+                if weight <= 0:
+                    continue
+                token_id = self._token_to_id(token)
+                # 多个 token 撞同一 id 时取 max（信息无损）
+                if token_id in result:
+                    result[token_id] = max(result[token_id], weight)
+                else:
+                    result[token_id] = weight
+            return result
 
     @property
     def n_docs(self) -> int:
         """已喂入的文档数（=``fit`` + 后续 :meth:`update` 的总条数）。"""
-        return self._n_docs
+        with self._lock:
+            return self._n_docs
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +331,7 @@ class LocalEmbedder(Embedder):
         # 懒加载：构造时不下载，embed 时再加载
         self._model_name = dense_model
         self._model: SentenceTransformer | None = None
+        self._model_lock = threading.Lock()  # 防止多线程重复加载
         self._sparse = TFIDFSparseEncoder()  # bm25_language 占位，未来扩展
 
     def _ensure_model(self) -> SentenceTransformer:
@@ -334,7 +341,9 @@ class LocalEmbedder(Embedder):
         后续调用直接返回缓存对象。
         """
         if self._model is None:
-            self._model = SentenceTransformer(self._model_name)
+            with self._model_lock:
+                if self._model is None:   # double-check locking
+                    self._model = SentenceTransformer(self._model_name)
         return self._model
 
     def embed_dense(self, text: str, mode: Mode = "document") -> list[float]:
@@ -365,7 +374,8 @@ class LocalEmbedder(Embedder):
 
     def close(self) -> None:
         """释放模型引用让 GC 回收。下次 :meth:`embed_dense` 会重新加载。"""
-        self._model = None  # 释放引用让 GC 回收
+        with self._model_lock:
+            self._model = None  # 释放引用让 GC 回收
 
     @property
     def sparse_encoder(self) -> TFIDFSparseEncoder:
