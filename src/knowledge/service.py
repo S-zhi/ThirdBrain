@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import traceback
 from collections.abc import Sequence
 from uuid import uuid4
+
+from openai import OpenAIError
+from pymongo.errors import PyMongoError
 
 from src.knowledge.contracts import KnowledgeExtractor, KnowledgeIndexWriter, KnowledgeRepository
 from src.knowledge.merge import ConservativeMergePlanner, MergeResolution
@@ -21,13 +27,10 @@ from src.knowledge.models import (
     ValidationIssue,
     ValidationSummary,
     WikiUpdateInput,
+    _PublishAlreadyDone,
+    _PublishConflict,
     utc_now,
 )
-import asyncio
-import logging
-import traceback
-from pymongo.errors import PyMongoError
-from openai import OpenAIError
 from src.knowledge.openai_extractor import KnowledgeExtractionError
 from src.knowledge.validation import validate_extraction
 
@@ -114,7 +117,7 @@ class KnowledgeUpdateService:
         ):
             try:
                 await self._index_writer.upsert(tuple(published_for_index))
-            except Exception as error:  # noqa: BLE001 - 索引是可重建派生物，不能回滚发布。
+            except Exception as error:
                 logger.warning(
                     "knowledge.update.index_upsert_failed: %s",
                     str(error),
@@ -268,8 +271,29 @@ class KnowledgeUpdateService:
             phase = "publish"
             try:
                 published = await self._repository.publish(staging_id)
-            except Exception:
-                await self._repository.abandon(staging_id, "publish failed")
+            except _PublishConflict:
+                # 并发冲突 — 不 abandon，让调用方在更高层 retry
+                raise
+            except _PublishAlreadyDone:
+                # 幂等成功
+                return (
+                    DocumentUpdateOutcome(
+                        document_id=document.document_id,
+                        rag_collection_id=document.rag_collection_id,
+                        action=ChangeAction.UNCHANGED,
+                        validation=ValidationSummary(passed=True, issues=()),
+                    ),
+                    (),
+                )
+            except (TimeoutError, PyMongoError) as error:
+                # 临时 IO 失败 — 标 staged 不动，让运维 / 重试协调器处理
+                logger.warning("knowledge.publish.io_error staging_id=%s err=%s", staging_id, error)
+                raise
+            except Exception as error:
+                # 真正不可恢复 — 调 abandon
+                await self._repository.abandon(
+                    staging_id, f"publish failed: {type(error).__name__}: {error}"
+                )
                 raise
             changes = tuple(
                 ArtifactChange(
@@ -290,9 +314,20 @@ class KnowledgeUpdateService:
                 ),
                 published,
             )
+        except (TimeoutError, _PublishConflict):
+            raise
         except asyncio.CancelledError:
             raise
-        except (KnowledgeExtractionError, OpenAIError, PyMongoError, ValueError, TypeError) as error:
+        except (
+            KnowledgeExtractionError,
+            OpenAIError,
+            PyMongoError,
+            ValueError,
+            TypeError,
+        ) as error:
+            if phase == "publish" and isinstance(error, PyMongoError):
+                # Do not swallow publish phase transient PyMongoError
+                raise
             if isinstance(error, (KnowledgeExtractionError, OpenAIError)):
                 code = "KNOWLEDGE_UPDATE_LLM_ERROR"
             elif isinstance(error, PyMongoError):
@@ -329,8 +364,10 @@ class KnowledgeUpdateService:
                 ),
                 (),
             )
-        except Exception as error:
-            logger.exception("knowledge.update.unexpected_error document_id=%s", document.document_id)
+        except Exception:
+            logger.exception(
+                "knowledge.update.unexpected_error document_id=%s", document.document_id
+            )
             raise
 
     @staticmethod
