@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 
 import zvec
@@ -17,6 +18,9 @@ from src.dao.emb.director import CollectionSession
 from src.dao.emb.embedder import Embedder, build_embedder
 from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
 from src.knowledge.models import ArtifactRevision
+from src.knowledge.reindex import RebuildResult
+
+logger = logging.getLogger(__name__)
 
 FIELD_ARTIFACT_ID = "artifact_id"
 FIELD_ARTIFACT_REVISION_ID = "artifact_revision_id"
@@ -204,12 +208,12 @@ class ZvecKnowledgeIndexWriter:
         self._collection_name = collection_name
         self._embedder_factory = embedder_factory
 
-    async def upsert(self, artifacts: tuple[ArtifactRevision, ...]) -> None:
-        """串行写入 Zvec；阻塞的 embedding/IO 在线程中执行。"""
+    async def upsert(self, artifacts: tuple[ArtifactRevision, ...]) -> dict[str, object]:
+        """串行写入 Zvec；阻塞 of embedding/IO are executed in thread."""
 
         if not artifacts:
-            return
-        await asyncio.to_thread(self._upsert_sync, artifacts)
+            return {"ok": 0, "errors": []}
+        return await asyncio.to_thread(self._upsert_sync, artifacts)
 
     async def rebuild(
         self,
@@ -218,7 +222,7 @@ class ZvecKnowledgeIndexWriter:
         wiki_id: str | None = None,
         namespace: str | None = None,
         version: str | None = None,
-    ) -> None:
+    ) -> RebuildResult:
         """按正式 Catalog 快照重建指定 Scope 的派生索引。
 
         Zvec 0.6 提供 ``delete_by_filter``，所以可以先清理当前 Scope，再
@@ -227,7 +231,7 @@ class ZvecKnowledgeIndexWriter:
         正式知识仍然保持不变，调用方会得到失败结果并可再次重建。
         """
 
-        await asyncio.to_thread(
+        return await asyncio.to_thread(
             self._rebuild_sync,
             artifacts,
             wiki_id=wiki_id,
@@ -242,10 +246,12 @@ class ZvecKnowledgeIndexWriter:
         wiki_id: str | None,
         namespace: str | None,
         version: str | None,
-    ) -> None:
+    ) -> RebuildResult:
         """同步执行 Scope 清理和完整 Artifact 投影。"""
 
         schema = get_knowledge_collection_schema(self._collection_name)
+        indexed_count = 0
+        failed: list[str] = []
         embedder: Embedder | None = None
         try:
             with CollectionSession(self._collection_name, schema=schema) as collection:
@@ -257,16 +263,29 @@ class ZvecKnowledgeIndexWriter:
                     )
                 )
                 if not artifacts:
-                    return
+                    return RebuildResult(indexed_count=0)
                 embedder = self._embedder_factory()
                 texts = [artifact_index_text(artifact) for artifact in artifacts]
                 embedder.fit_sparse(texts)
                 for artifact in artifacts:
-                    collection.upsert(artifact_to_zvec_doc(artifact, embedder))
+                    try:
+                        collection.upsert(artifact_to_zvec_doc(artifact, embedder))
+                        indexed_count += 1
+                    except Exception as e:  # noqa: BLE001 - individual artifact indexing is isolated
+                        failed.append(artifact.artifact_id)
+                        logger.warning(
+                            "rebuild.upsert_failed artifact_id=%s error=%s",
+                            artifact.artifact_id,
+                            e,
+                        )
                 collection.flush()
         finally:
             if embedder is not None:
                 embedder.close()
+        return RebuildResult(
+            indexed_count=indexed_count,
+            failed_artifact_ids=tuple(failed),
+        )
 
     async def check_consistency(
         self,
@@ -316,16 +335,28 @@ class ZvecKnowledgeIndexWriter:
             "orphan_count": None,
         }
 
-    def _upsert_sync(self, artifacts: tuple[ArtifactRevision, ...]) -> None:
+    def _upsert_sync(self, artifacts: tuple[ArtifactRevision, ...]) -> dict[str, object]:
         """建立 sparse corpus 后生成向量并 upsert，始终释放 embedder 资源。"""
 
         embedder = self._embedder_factory()
+        indexed_count = 0
+        errors: list[tuple[str, str]] = []
         try:
             texts = [artifact_index_text(artifact) for artifact in artifacts]
             embedder.fit_sparse(texts)
             schema = get_knowledge_collection_schema(self._collection_name)
             with CollectionSession(self._collection_name, schema=schema) as collection:
                 for artifact in artifacts:
-                    collection.upsert(artifact_to_zvec_doc(artifact, embedder))
+                    try:
+                        collection.upsert(artifact_to_zvec_doc(artifact, embedder))
+                        indexed_count += 1
+                    except Exception as e:  # noqa: BLE001 - individual artifact indexing is isolated
+                        errors.append((artifact.artifact_id, str(e)))
+                        logger.warning(
+                            "upsert.upsert_failed artifact_id=%s error=%s",
+                            artifact.artifact_id,
+                            e,
+                        )
         finally:
             embedder.close()
+        return {"ok": indexed_count, "errors": errors}
