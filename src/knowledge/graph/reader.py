@@ -155,7 +155,7 @@ class GraphRelationReader:
                 )
             )
 
-        hits.sort(key=lambda h: -h.raw_score)
+        hits.sort(key=lambda h: -(h.raw_score or 0.0))
         return ReaderSearchResult(hits=tuple(hits[:limit]), warnings=tuple(warnings))
 
 

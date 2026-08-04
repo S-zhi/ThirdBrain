@@ -43,8 +43,14 @@ async def create_index_if_missing(
         RuntimeError: If key or partialFilterExpression drift is detected.
         DAOError: Re-mapped MongoDB errors.
     """
-    existing_iter = await collection.list_indexes()
-    existing = {idx["name"]: idx async for idx in existing_iter}
+    try:
+        existing_iter = await collection.list_indexes()
+        existing = {idx["name"]: idx async for idx in existing_iter}
+    except PyMongoError as exc:
+        if exc.code == 26:
+            existing = {}
+        else:
+            raise
 
     if name in existing:
         existing_idx = existing[name]
