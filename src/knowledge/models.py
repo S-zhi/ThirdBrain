@@ -86,6 +86,21 @@ class RelationType(StrEnum):
     REFERENCES = "references"
     NAVIGATIONAL = "navigational"
 
+    # Inverse relation types
+    DEPENDED_ON_BY = "depended_on_by"
+    SUPERSEDED_BY = "superseded_by"
+    CONSTRAINED_BY = "constrained_by"
+
+
+def get_inverse_relation(relation_type: RelationType) -> RelationType:
+    """获取有向关系的反向（逆）关系类型。如果是无向或无逆关系则返回原值。"""
+    mapping = {
+        RelationType.DEPENDS_ON: RelationType.DEPENDED_ON_BY,
+        RelationType.SUPERSEDES: RelationType.SUPERSEDED_BY,
+        RelationType.CONSTRAINS: RelationType.CONSTRAINED_BY,
+    }
+    return mapping.get(relation_type, relation_type)
+
 
 def sha256_text(value: str) -> str:
     """返回 UTF-8 文本的稳定 SHA-256 摘要。"""
