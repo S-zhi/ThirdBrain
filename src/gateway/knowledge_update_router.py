@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, cast
 from uuid import uuid4
 
@@ -14,6 +15,8 @@ from src.gateway.knowledge_update_schemas import (
     KnowledgeUpdateRequest,
 )
 from src.knowledge import KnowledgeUpdateService, UpdateResult
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/v1/knowledge",
@@ -93,7 +96,8 @@ async def update_knowledge(
             request_id=request_id,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
-    except Exception:  # noqa: BLE001 - Gateway 不泄露 provider/存储内部异常。
+    except Exception as error:  # noqa: BLE001 - Gateway 不泄露 provider/存储内部异常。
+        logger.exception("gateway.knowledge_update.unexpected_error: %s", str(error))
         return _error_response(
             code="KNOWLEDGE_UPDATE_UNAVAILABLE",
             message="Knowledge 写入暂时不可用",

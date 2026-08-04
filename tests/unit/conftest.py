@@ -114,3 +114,57 @@ api_name:
     cfg_mod.get_config(yaml_path)  # get_config 会 set singleton，load_config 不会
     yield yaml_path
     cfg_mod.reset_config()
+
+
+@pytest.fixture
+def tmp_config(isolated_config):
+    return isolated_config
+
+
+@pytest.fixture
+def use_tmp_config(isolated_config):
+    return isolated_config
+
+
+@pytest.fixture
+def make_zvec_doc(isolated_config):
+    import zvec
+    from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
+    import config as cfg
+
+    def _make(doc_id: str = "ns.op.test", **overrides) -> zvec.Doc:
+        c = cfg.get_config()
+        if c.embedder.type == "bailian":
+            dim = c.embedder.bailian.dimension
+        else:
+            dim = c.embedder.local.dimension
+
+        fields = {
+            "namespace": "com.test.v1",
+            "api_id": f"com.test.v1.{doc_id}",
+            "name": "Test",
+            "api_name": f"Test {doc_id}",
+            "version": "v1",
+            "kind": "function",
+            "language": "python",
+            "version_support": ["linux"],
+            "deprecated": False,
+            "ingested_at": 1720000000,
+            "description": f"desc {doc_id}",
+            "signature": f"{doc_id}()",
+            "parameters_md": "",
+            "returns_json": "null",
+            "examples": [],
+            "source_markdown": f"# {doc_id}",
+            "deprecation_note": "",
+        }
+        fields.update(overrides)
+        return zvec.Doc(
+            id=doc_id,
+            fields=fields,
+            vectors={
+                FIELD_DENSE_EMBEDDING: [0.1] * dim,
+                FIELD_SPARSE_EMBEDDING: {1: 0.5, 2: 0.3},
+            },
+        )
+    return _make
