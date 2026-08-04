@@ -20,6 +20,7 @@ from src.knowledge.models import (
 )
 from src.knowledge.reindex import (
     KnowledgeReindexService,
+    RebuildResult,
     ReindexScope,
     ReindexStatus,
 )
@@ -119,6 +120,7 @@ class RebuildWriter:
 
     async def rebuild(self, artifacts, **scope):
         self.rebuild_calls.append((tuple(artifacts), scope))
+        return RebuildResult(indexed_count=len(artifacts))
 
     async def check_consistency(self, artifacts, **scope):
         del scope
@@ -139,9 +141,51 @@ class UpsertOnlyWriter:
 
 
 class FailingWriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def rebuild(self, artifacts, **scope):
         del artifacts, scope
+        self.calls += 1
         raise RuntimeError("zvec unavailable")
+
+
+class PartialFailingRebuildWriter:
+    async def rebuild(self, artifacts, **scope):
+        del scope
+        # Simulate first artifact indexed, second failed
+        if len(artifacts) >= 2:
+            return RebuildResult(
+                indexed_count=1,
+                failed_artifact_ids=(artifacts[1].artifact_id,),
+            )
+        return RebuildResult(indexed_count=len(artifacts))
+
+
+class PartialFailingUpsertWriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def upsert(self, artifacts):
+        self.calls += 1
+        if self.calls == 2:
+            # Second batch: 0 ok, 1 error (since batch_size=1)
+            return {
+                "ok": 0,
+                "errors": [(artifacts[0].artifact_id, "UpsertError: zvec failed")],
+            }
+        return {"ok": len(artifacts), "errors": []}
+
+
+class ExceptionAfterPartialUpsertWriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def upsert(self, artifacts):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("Database connection lost")
+        return {"ok": len(artifacts), "errors": []}
 
 
 @pytest.mark.asyncio
@@ -221,6 +265,53 @@ async def test_index_failure_does_not_modify_catalog_and_reports_failed() -> Non
     assert result.artifacts_indexed == 0
     assert "index_write_failed" in result.errors[0]
     assert (await catalog.list_active_artifact_revisions()) == artifacts
+
+
+@pytest.mark.asyncio
+async def test_rebuild_partial_failures_report_granular_counts_and_warnings() -> None:
+    artifacts = (_artifact(1), _artifact(2))
+    catalog = FakeCatalog(artifacts)
+    writer = PartialFailingRebuildWriter()
+
+    result = await KnowledgeReindexService(catalog, writer).reindex()
+
+    assert result.status == ReindexStatus.PARTIAL
+    assert result.artifacts_discovered == 2
+    assert result.artifacts_indexed == 1
+    assert any("REBUILD_PARTIAL: 1 artifacts failed" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_upsert_partial_failures_accumulate_correct_counts_and_errors() -> None:
+    artifacts = (_artifact(1), _artifact(2), _artifact(3))
+    catalog = FakeCatalog(artifacts)
+    writer = PartialFailingUpsertWriter()
+
+    # Force 3 batches of size 1
+    result = await KnowledgeReindexService(catalog, writer).reindex(batch_size=1)
+
+    assert result.status == ReindexStatus.PARTIAL
+    assert result.artifacts_discovered == 3
+    assert result.artifacts_indexed == 2  # Batch 1: 1, Batch 2: 0, Batch 3: 1 (total 2)
+    assert len(result.errors) == 1
+    assert "upsert_failed" in result.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_upsert_exception_after_partial_success_keeps_indexed_count_and_status_partial() -> (
+    None
+):
+    artifacts = (_artifact(1), _artifact(2), _artifact(3))
+    catalog = FakeCatalog(artifacts)
+    writer = ExceptionAfterPartialUpsertWriter()
+
+    # Batch size 1. Batch 1 succeeds (indexed_count=1). Batch 2 throws RuntimeError.
+    result = await KnowledgeReindexService(catalog, writer).reindex(batch_size=1)
+
+    assert result.status == ReindexStatus.PARTIAL
+    assert result.artifacts_discovered == 3
+    assert result.artifacts_indexed == 1
+    assert "index_write_failed" in result.errors[0]
 
 
 def test_reindex_scope_requires_exact_or_full_scope() -> None:

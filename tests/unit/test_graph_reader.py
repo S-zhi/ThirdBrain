@@ -111,7 +111,6 @@ def _edge(
 ) -> GraphEdge:
     from src.knowledge.graph.models import (
         ClassificationMethod,
-        Direction,
         StrengthScoreBreakdown,
         strength_tier_from_score,
         utc_now,
@@ -124,6 +123,8 @@ def _edge(
         w_evidence=1.0,
         w_density=0.4,
     )
+    from src.knowledge.graph.scoring import infer_direction
+
     return GraphEdge(
         edge_id="edge_" + source_id[-8:] + target_id[-8:] + relation_type.value,
         wiki_id=WIKI_ID,
@@ -139,7 +140,7 @@ def _edge(
         strength_score=score,
         strength_tier=strength_tier_from_score(score),
         breakdown=breakdown,
-        direction=Direction.DIRECTED,
+        direction=infer_direction(relation_type),
         evidence=_evidence(),
         classified_by=ClassificationMethod.RULE,
         classified_at=utc_now(),
@@ -257,7 +258,82 @@ class TestGraphRelationReaderExpand:
         # item.relationships 应包含图边作为 RelationRef
         graph_relations = [r for r in hit.item.relationships if r.target_id == art_a.artifact_id]
         assert len(graph_relations) == 1
-        assert graph_relations[0].relation == RelationType.DEPENDS_ON
+        assert graph_relations[0].relation == RelationType.DEPENDED_ON_BY
+
+    @pytest.mark.asyncio
+    async def test_directed_edge_inverse_mapping(self, scope: QueryScope) -> None:
+        """验证有向边（如 depends_on, supersedes, constrains）在召回时被正确映射为逆关系类型。"""
+        art_a = _active_artifact("AscendC.Printf")
+        art_b = _active_artifact("AscendC.AllocTensor")
+
+        # Test case: SUPERSEDES -> SUPERSEDED_BY
+        store1 = InMemoryGraphStore()
+        store1.seed(
+            [
+                _edge(
+                    art_a.artifact_id,
+                    "AscendC.Printf",
+                    art_b.artifact_id,
+                    "AscendC.AllocTensor",
+                    RelationType.SUPERSEDES,
+                )
+            ]
+        )
+        reader1 = GraphRelationReader(store1, InMemoryKnowledgeRepo([art_a, art_b]))  # type: ignore[arg-type]
+        result1 = await reader1.expand((art_a.artifact_id,), scope, limit=10)
+        assert len(result1.hits) == 1
+        graph_relations1 = [
+            r for r in result1.hits[0].item.relationships if r.target_id == art_a.artifact_id
+        ]
+        assert graph_relations1[0].relation == RelationType.SUPERSEDED_BY
+
+        # Test case: CONSTRAINS -> CONSTRAINED_BY
+        store2 = InMemoryGraphStore()
+        store2.seed(
+            [
+                _edge(
+                    art_a.artifact_id,
+                    "AscendC.Printf",
+                    art_b.artifact_id,
+                    "AscendC.AllocTensor",
+                    RelationType.CONSTRAINS,
+                )
+            ]
+        )
+        reader2 = GraphRelationReader(store2, InMemoryKnowledgeRepo([art_a, art_b]))  # type: ignore[arg-type]
+        result2 = await reader2.expand((art_a.artifact_id,), scope, limit=10)
+        assert len(result2.hits) == 1
+        graph_relations2 = [
+            r for r in result2.hits[0].item.relationships if r.target_id == art_a.artifact_id
+        ]
+        assert graph_relations2[0].relation == RelationType.CONSTRAINED_BY
+
+    @pytest.mark.asyncio
+    async def test_undirected_edge_preserves_relation_type(self, scope: QueryScope) -> None:
+        """验证无向边（如 sibling, references）在召回时保持原有关系类型不变。"""
+        art_a = _active_artifact("AscendC.Printf")
+        art_b = _active_artifact("AscendC.AllocTensor")
+
+        # Test case: SIBLING -> SIBLING
+        store = InMemoryGraphStore()
+        store.seed(
+            [
+                _edge(
+                    art_a.artifact_id,
+                    "AscendC.Printf",
+                    art_b.artifact_id,
+                    "AscendC.AllocTensor",
+                    RelationType.SIBLING,
+                )
+            ]
+        )
+        reader = GraphRelationReader(store, InMemoryKnowledgeRepo([art_a, art_b]))  # type: ignore[arg-type]
+        result = await reader.expand((art_a.artifact_id,), scope, limit=10)
+        assert len(result.hits) == 1
+        graph_relations = [
+            r for r in result.hits[0].item.relationships if r.target_id == art_a.artifact_id
+        ]
+        assert graph_relations[0].relation == RelationType.SIBLING
 
     @pytest.mark.asyncio
     async def test_dedupes_shared_target_across_seeds(self, scope: QueryScope) -> None:
