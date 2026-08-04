@@ -12,6 +12,8 @@ on:
 
 permissions:
   contents: read
+  checks: write
+  pull-requests: write
 
 concurrency:
   group: unit-tests-${{ github.event.pull_request.number || github.ref }}
@@ -40,49 +42,52 @@ jobs:
         run: uv sync --locked
 
       - name: Run unit tests
-        id: pytest
-        continue-on-error: true
-        run: |
-          set +e
-          uv run pytest tests/unit --junitxml=test-results.xml
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          exit 0
+        run: uv run pytest tests/unit --junitxml=test-results.xml
 
-      - name: Write test summary
-        if: always()
+      - name: Publish unit test results
+        id: test-results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: test-results.xml
+          check_name: Unit Test Results
+          comment_mode: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'failures' || 'off' }}
+          job_summary: true
+          check_run: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          compare_to_earlier_commit: true
+          check_run_annotations: all tests, skipped tests
+          check_run_annotations_branch: "*"
+          action_fail_on_inconclusive: true
+
+      - name: Add pass and failure rates
+        if: ${{ !cancelled() && steps.test-results.outputs.json != '' }}
+        env:
+          TEST_RESULTS_JSON: ${{ steps.test-results.outputs.json }}
         run: |
           python - <<'PY'
+          import json
           import os
-          import xml.etree.ElementTree as ET
           from pathlib import Path
 
-          report = Path("test-results.xml")
+          result = json.loads(os.environ["TEST_RESULTS_JSON"])
+          stats = result["stats"]
+          passed = int(stats["tests_succ"])
+          failed = int(stats["tests_fail"]) + int(stats["tests_error"])
+          skipped = int(stats["tests_skip"])
+          executed = passed + failed
+          pass_rate = passed / executed * 100 if executed else 0.0
+          failure_rate = failed / executed * 100 if executed else 0.0
 
-          if report.exists():
-              root = ET.parse(report).getroot()
-              suites = list(root.iter("testsuite"))
+          summary = f"""## Test rates
 
-              total = sum(int(s.attrib.get("tests", 0)) for s in suites)
-              failed = sum(int(s.attrib.get("failures", 0)) for s in suites)
-              errors = sum(int(s.attrib.get("errors", 0)) for s in suites)
-              skipped = sum(int(s.attrib.get("skipped", 0)) for s in suites)
-
-              passed = total - failed - errors - skipped
-              executed = total - skipped
-              rate = passed / executed * 100 if executed else 0
-
-              summary = f"""## Unit test result
-
-          - Passed: {passed}
-          - Failed: {failed + errors}
-          - Skipped: {skipped}
-          - Pass rate: {rate:.2f}%
+          | Metric | Result |
+          | --- | ---: |
+          | Passed | {passed} |
+          | Failed / errors | {failed} |
+          | Skipped | {skipped} |
+          | Pass rate | {pass_rate:.2f}% |
+          | Failure rate | {failure_rate:.2f}% |
           """
-          else:
-              summary = "## Unit test result\n\nNo test report was generated."
-
-          print(summary)
 
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
               "a", encoding="utf-8"
@@ -91,13 +96,9 @@ jobs:
           PY
 
       - name: Upload test report
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: junit-test-report
           path: test-results.xml
-          if-no-files-found: ignore
-
-      - name: Fail if tests failed
-        if: steps.pytest.outputs.exit_code != '0'
-        run: exit 1
+          if-no-files-found: warn
