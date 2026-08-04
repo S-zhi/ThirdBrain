@@ -17,13 +17,10 @@
 from __future__ import annotations
 
 import gc
-import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import zvec
-
-logger = logging.getLogger(__name__)
 
 from src.dao.emb.doc import ApiDocumentLike, from_orm
 from src.dao.emb.embedder import Embedder
@@ -312,7 +309,8 @@ def update_many(collection: str, ddocs: Iterable[DirectorDoc]) -> list:
         return []
     with CollectionSession(collection) as coll:
         zvec_docs = [
-            zvec.Doc(id=ddoc.doc_id, fields=from_orm(ddoc.record).fields) for ddoc in ddocs_list
+            zvec.Doc(id=ddoc.doc_id, fields=from_orm(ddoc.record).fields)
+            for ddoc in ddocs_list
         ]
         return _low_update_batch(coll, zvec_docs)
 
@@ -338,22 +336,6 @@ def fetch(collection: str, doc_id: str) -> DirectorDoc | None:
     # raw 是 zvec.Doc-like 对象，有 .fields 和 .id
     # 反向构造 ApiDocumentLike：用 SimpleNamespace 包出 duck-typed 对象
     from types import SimpleNamespace
-
-    version_support = list(raw.fields.get("version_support", []) or [])
-    if not version_support:
-        logger.warning(
-            "director.fetch.empty_version_support doc_id=%s collection=%s "
-            "原 product_support 已是空（zvec 写入时就没值）",
-            raw.id,
-            collection,
-        )
-
-    product_support = [
-        {"product": str(name), "supported": True}
-        for name in version_support
-        if isinstance(name, str) and name
-    ]
-
     record = SimpleNamespace(
         chunk_id=raw.id,
         name=raw.fields.get("name", ""),
@@ -366,7 +348,7 @@ def fetch(collection: str, doc_id: str) -> DirectorDoc | None:
         returns=raw.fields.get("returns_json", ""),
         examples=list(raw.fields.get("examples", []) or []),
         body_md=raw.fields.get("source_markdown", ""),
-        product_support=product_support,
+        product_support=[],  # zvec 存的是 version_support，反推太复杂；留空
         signature=raw.fields.get("signature", ""),
         deprecated=bool(raw.fields.get("deprecated", False)),
         deprecation_note=raw.fields.get("deprecation_note", ""),
