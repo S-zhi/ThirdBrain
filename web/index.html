@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#d8dad4">
+  <meta name="description" content="ThirdBrain 在代码 Agent 调用陌生 API 前，查清版本、命名空间与参数契约。">
+  <meta property="og:title" content="ThirdBrain | 先查清楚，再让 Agent 动手">
+  <meta property="og:description" content="一个问题，换一份版本准确、来源可信的 API 上下文。">
+  <title>ThirdBrain | 先查清楚，再让 Agent 动手</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%23f25b2a' d='M0 0h64v64H0z'/%3E%3Cpath fill='%23121411' d='M12 14h40v12H38v26H26V26H12z'/%3E%3C/svg%3E">
+  <link rel="preload" href="assets/editorial-archive.jpg" as="image">
+  <link rel="preload" href="assets/figtree-black.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#question">跳到询问入口</a>
+
+  <div class="page-shell">
+    <header class="site-header">
+      <a class="wordmark" href="/web/" aria-label="ThirdBrain 首页">
+        <span>THIRD</span>
+        <span>BRAIN</span>
+      </a>
+
+      <div class="scope-readout" aria-label="当前检索范围">
+        <div><small>Namespace</small><strong>com.huawei.cann.ascendc</strong></div>
+        <div><small>Version</small><strong>910beta3</strong></div>
+      </div>
+    </header>
+
+    <main class="poster" id="main-content">
+      <figure class="archive-visual">
+        <img src="assets/editorial-archive.jpg" width="1800" height="1200" alt="技术文档、黑色档案卡和橙色工业亚克力组成的编辑式静物">
+      </figure>
+
+      <section class="manifesto" aria-labelledby="hero-title">
+        <p class="manifesto-label">Accuracy before generation</p>
+        <h1 id="hero-title">先查清楚<br><span>再让 Agent 动手</span></h1>
+        <p class="manifesto-copy">版本、命名空间、参数契约。一次询问，拿到能执行的上下文。</p>
+      </section>
+
+      <section class="query-stage" aria-labelledby="query-title">
+        <div class="ask-tab" aria-hidden="true">ASK</div>
+        <article class="query-desk" id="queryCard" data-state="input">
+          <form id="queryForm" novalidate>
+            <div class="form-heading">
+              <label id="query-title" for="question">你准备调用什么？</label>
+              <span id="charCount">000 / 1000</span>
+            </div>
+
+            <textarea id="question" name="question" rows="3" maxlength="1000" autocomplete="off" spellcheck="false" placeholder="描述具体的 API 使用意图" aria-describedby="queryHelp queryStatus" required></textarea>
+
+            <div class="form-actions">
+              <p id="queryHelp">按 ⌘ Enter 直接提交</p>
+              <button class="ask-button" id="askButton" type="submit">
+                <span>询问</span><b aria-hidden="true">→</b>
+              </button>
+            </div>
+          </form>
+
+          <div class="loading-view" id="loadingView" hidden aria-hidden="true">
+            <div class="loading-word" aria-hidden="true">RECALL</div>
+            <p>正在固定版本范围内查找证据</p>
+            <div class="loading-rule"><i></i></div>
+          </div>
+
+          <div class="result-view" id="resultView" hidden aria-hidden="true">
+            <header class="result-header">
+              <span class="result-state" id="resultState">VERIFIED CONTEXT</span>
+              <span class="result-rank" id="resultRank">RANK 01</span>
+            </header>
+            <h2 class="result-title" id="resultTitle"></h2>
+            <div class="result-meta" id="resultMeta"></div>
+            <p class="result-summary" id="resultSummary" hidden></p>
+            <div class="result-content" id="resultContent" hidden></div>
+            <div class="result-actions">
+              <a class="source-link" id="sourceLink" href="#" target="_blank" rel="noopener noreferrer" hidden>官方来源 ↗</a>
+              <button class="reset-button" id="resetButton" type="button">再问一个</button>
+            </div>
+          </div>
+        </article>
+
+        <div class="query-status" id="queryStatus" role="status" aria-live="polite">
+          <p>当前只开放一个入口。结果会在原位返回。</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p>ThirdBrain</p>
+      <p>Cold API documents, ready when the agent needs them.</p>
+    </footer>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
