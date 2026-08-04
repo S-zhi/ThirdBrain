@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import yaml
+
 from config import get_config
 from src.script.markdown_yaml_v21 import (
     PipelineResult,
@@ -2513,7 +2514,7 @@ def is_completed_batch_output(document_path: Path, output_path: Path) -> bool:
             and source["content_hash"] == calculate_content_hash(markdown)
             and result["source_markdown"] == markdown
         )
-    except ExtractionError, OSError, UnicodeDecodeError, yaml.YAMLError, TypeError:
+    except (ExtractionError, OSError, UnicodeDecodeError, yaml.YAMLError, TypeError, KeyError):
         return False
 
 
