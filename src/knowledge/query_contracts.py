@@ -88,6 +88,7 @@ class QueryEvidenceRef(QueryModel):
 
     wiki_id: str = ""
     rag_collection_id: str = ""
+    namespace: str = ""
     source_origin: SourceOrigin | None = None
     source_metadata: dict[str, object] = Field(default_factory=dict)
     document_id: NonEmptyString

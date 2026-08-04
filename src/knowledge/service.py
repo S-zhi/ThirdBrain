@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import traceback
 from collections.abc import Sequence
 from uuid import uuid4
+
+from openai import OpenAIError
+from pymongo.errors import PyMongoError
 
 from src.knowledge.contracts import KnowledgeExtractor, KnowledgeIndexWriter, KnowledgeRepository
 from src.knowledge.merge import ConservativeMergePlanner, MergeResolution
@@ -23,11 +29,6 @@ from src.knowledge.models import (
     WikiUpdateInput,
     utc_now,
 )
-import asyncio
-import logging
-import traceback
-from pymongo.errors import PyMongoError
-from openai import OpenAIError
 from src.knowledge.openai_extractor import KnowledgeExtractionError
 from src.knowledge.validation import validate_extraction
 
@@ -114,7 +115,7 @@ class KnowledgeUpdateService:
         ):
             try:
                 await self._index_writer.upsert(tuple(published_for_index))
-            except Exception as error:  # noqa: BLE001 - 索引是可重建派生物，不能回滚发布。
+            except Exception as error:
                 logger.warning(
                     "knowledge.update.index_upsert_failed: %s",
                     str(error),
@@ -329,7 +330,7 @@ class KnowledgeUpdateService:
                 ),
                 (),
             )
-        except Exception as error:
+        except Exception:
             logger.exception("knowledge.update.unexpected_error document_id=%s", document.document_id)
             raise
 
