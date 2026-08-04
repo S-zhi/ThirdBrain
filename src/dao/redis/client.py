@@ -147,7 +147,7 @@ class RedisDatabase:
                 continue
             try:
                 result.append(int(raw))
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 result.append(None)
         return result
 
