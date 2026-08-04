@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import PyMongoError
+from pymongo.errors import PyMongoError, DuplicateKeyError
 
 from src.dao.mongo._tracing import log_op, remap_pymongo_error
 from src.dao.mongo.database import MongoDatabase
@@ -363,8 +363,19 @@ class MongoKnowledgeRepository:
         """发布 staging 的可达指针；catalog 比较失败即视为并发冲突。"""
 
         entry = await self._load_staging(staging_id)
-        if entry.get("state") != "staged":
-            raise RuntimeError(f"knowledge staging is not publishable: {entry.get('state')}")
+        state = entry.get("state")
+        if state == "published":
+            revisions = tuple(
+                ArtifactRevision.model_validate(value) for value in entry.get("artifact_revisions", [])
+            )
+            return tuple(
+                revision for revision in revisions if revision.status == ArtifactStatus.ACTIVE
+            )
+        elif state == "abandoned":
+            raise RuntimeError(f"knowledge staging is not publishable: abandoned")
+        elif state != "staged":
+            raise RuntimeError(f"knowledge staging is not publishable: {state}")
+
         source = SourceRevision.model_validate(entry["source_revision"])
         revisions = tuple(
             ArtifactRevision.model_validate(value) for value in entry.get("artifact_revisions", [])
@@ -374,58 +385,95 @@ class MongoKnowledgeRepository:
             for revision in revisions
         ):
             raise RuntimeError("knowledge staging 包含跨 Wiki revision，拒绝发布")
-        await self._insert_immutable_revisions(source, revisions)
 
-        source_pointer = {
-            "source_revision_id": source.source_revision_id,
-            "revision_number": source.revision_number,
-            "content_hash": source.document.content_hash,
-            "compiler_fingerprint": source.compiler_fingerprint,
-        }
-        pointer_updates: dict[str, Any] = {f"sources.{source.source_id}": source_pointer}
         active = tuple(
             revision for revision in revisions if revision.status == ArtifactStatus.ACTIVE
         )
-        for revision in active:
-            pointer_updates[f"artifacts.{revision.artifact_id}"] = {
-                "artifact_revision_id": revision.artifact_revision_id,
-                "revision_number": revision.revision_number,
-                "status": revision.status.value,
+
+        async def _do_publish(session: Any = None) -> None:
+            await self._insert_immutable_revisions(source, revisions, session=session)
+
+            source_pointer = {
+                "source_revision_id": source.source_revision_id,
+                "revision_number": source.revision_number,
+                "content_hash": source.document.content_hash,
+                "compiler_fingerprint": source.compiler_fingerprint,
             }
-        catalog = self._catalog()
-        started = time.perf_counter()
-        try:
-            published_catalog = await catalog.find_one_and_update(
-                {"_id": entry["catalog_id"], "revision": entry["catalog_revision"]},
-                {"$set": pointer_updates, "$inc": {"revision": 1}},
-                upsert=entry["catalog_revision"] == 0,
-                return_document=ReturnDocument.AFTER,
-            )
-        except PyMongoError as error:
-            log_op(
-                operation="find_one_and_update",
-                collection=catalog.name,
-                started=started,
-                success=False,
-                error_type=type(error).__name__,
-            )
-            raise remap_pymongo_error(error) from error
-        if published_catalog is None:
-            raise RuntimeError("knowledge catalog changed while staging; retry update")
-        log_op(operation="find_one_and_update", collection=catalog.name, started=started, matched=1)
-        await self._mark_staging(staging_id, state="published")
+            pointer_updates: dict[str, Any] = {f"sources.{source.source_id}": source_pointer}
+            for revision in active:
+                pointer_updates[f"artifacts.{revision.artifact_id}"] = {
+                    "artifact_revision_id": revision.artifact_revision_id,
+                    "revision_number": revision.revision_number,
+                    "status": revision.status.value,
+                }
+            catalog = self._catalog()
+            started = time.perf_counter()
+            try:
+                published_catalog = await catalog.find_one_and_update(
+                    {"_id": entry["catalog_id"], "revision": entry["catalog_revision"]},
+                    {"$set": pointer_updates, "$inc": {"revision": 1}},
+                    upsert=entry["catalog_revision"] == 0,
+                    return_document=ReturnDocument.AFTER,
+                    session=session,
+                )
+            except PyMongoError as error:
+                log_op(
+                    operation="find_one_and_update",
+                    collection=catalog.name,
+                    started=started,
+                    success=False,
+                    error_type=type(error).__name__,
+                )
+                raise remap_pymongo_error(error) from error
+
+            if published_catalog is None:
+                current_catalog = await catalog.find_one({"_id": entry["catalog_id"]}, session=session)
+                if current_catalog is not None:
+                    sources_ptr = current_catalog.get("sources", {})
+                    if isinstance(sources_ptr, dict):
+                        src_ptr = sources_ptr.get(source.source_id)
+                        if isinstance(src_ptr, dict) and src_ptr.get("source_revision_id") == source.source_revision_id:
+                            published_catalog = current_catalog
+
+                if published_catalog is None:
+                    raise RuntimeError("knowledge catalog changed while staging; retry update")
+
+            log_op(operation="find_one_and_update", collection=catalog.name, started=started, matched=1)
+            await self._mark_staging(staging_id, state="published", session=session)
+
+        if self._mongo.settings.use_transactions:
+            async with await self._mongo.client.start_session() as session:
+                async with session.start_transaction():
+                    await _do_publish(session=session)
+        else:
+            await _do_publish()
+
         return active
 
     async def abandon(self, staging_id: str, reason: str) -> None:
         """记录 staging 失败原因；不可达修订交给后续维护任务清理。"""
 
+        entry = await self._load_staging(staging_id)
+        if entry.get("state") == "published":
+            raise RuntimeError("published staging cannot be abandoned")
+
+        source = SourceRevision.model_validate(entry["source_revision"])
+        catalog = await self._active_catalog(source.wiki_id)
+        if catalog is not None:
+            sources_ptr = catalog.get("sources", {})
+            if isinstance(sources_ptr, dict):
+                src_ptr = sources_ptr.get(source.source_id)
+                if isinstance(src_ptr, dict) and src_ptr.get("source_revision_id") == source.source_revision_id:
+                    await self._mark_staging(staging_id, state="published")
+                    return
+
         await self._mark_staging(staging_id, state="abandoned", reason=reason)
 
-    async def _active_catalog(self, wiki_id: str) -> dict[str, Any] | None:
+    async def _active_catalog(self, wiki_id: str, session: Any = None) -> dict[str, Any] | None:
         collection = self._catalog()
         started = time.perf_counter()
         try:
-            document = await collection.find_one({"_id": active_catalog_id(wiki_id)})
+            document = await collection.find_one({"_id": active_catalog_id(wiki_id)}, session=session)
         except PyMongoError as error:
             log_op(
                 operation="find_one",
@@ -443,18 +491,18 @@ class MongoKnowledgeRepository:
         )
         return document
 
-    async def _find_source_revision(self, revision_id: str) -> SourceRevision | None:
+    async def _find_source_revision(self, revision_id: str, session: Any = None) -> SourceRevision | None:
         collection = self._sources()
         try:
-            document = await collection.find_one({"_id": revision_id})
+            document = await collection.find_one({"_id": revision_id}, session=session)
         except PyMongoError as error:
             raise remap_pymongo_error(error) from error
         return SourceRevision.model_validate(_without_mongo_id(document)) if document else None
 
-    async def _load_staging(self, staging_id: str) -> dict[str, Any]:
+    async def _load_staging(self, staging_id: str, session: Any = None) -> dict[str, Any]:
         collection = self._staging()
         try:
-            entry = await collection.find_one({"_id": staging_id})
+            entry = await collection.find_one({"_id": staging_id}, session=session)
         except PyMongoError as error:
             raise remap_pymongo_error(error) from error
         if entry is None:
@@ -465,6 +513,7 @@ class MongoKnowledgeRepository:
         self,
         source: SourceRevision,
         artifacts: tuple[ArtifactRevision, ...],
+        session: Any = None,
     ) -> None:
         """先写不可达 revision；失败时 catalog 指针绝不会更新。"""
 
@@ -476,18 +525,25 @@ class MongoKnowledgeRepository:
             payload["_id"] = artifact.artifact_revision_id
             artifact_payloads.append(payload)
         try:
-            await self._sources().insert_one(source_payload)
-            if artifact_payloads:
-                await self._artifacts().insert_many(artifact_payloads, ordered=True)
+            try:
+                await self._sources().insert_one(source_payload, session=session)
+            except DuplicateKeyError:
+                pass
+            for payload in artifact_payloads:
+                try:
+                    await self._artifacts().insert_one(payload, session=session)
+                except DuplicateKeyError:
+                    pass
         except PyMongoError as error:
             raise remap_pymongo_error(error) from error
 
-    async def _mark_staging(self, staging_id: str, *, state: str, reason: str = "") -> None:
+    async def _mark_staging(self, staging_id: str, *, state: str, reason: str = "", session: Any = None) -> None:
         collection = self._staging()
         try:
             await collection.update_one(
                 {"_id": staging_id},
                 {"$set": {"state": state, "reason": reason}},
+                session=session,
             )
         except PyMongoError as error:
             raise remap_pymongo_error(error) from error
