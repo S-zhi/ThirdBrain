@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
 from uuid import uuid4
@@ -56,6 +57,15 @@ class ReindexScope(BaseModel):
         if self.is_full:
             return "all"
         return f"{self.wiki_id}/{self.namespace}/{self.version}"
+
+
+@dataclass(frozen=True)
+class RebuildResult:
+    """索引重建结果的精细计数和状态反馈。"""
+
+    indexed_count: int
+    failed_artifact_ids: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 class ReindexStatus(StrEnum):
@@ -111,7 +121,7 @@ class KnowledgeIndexRebuilder(Protocol):
         wiki_id: str | None = None,
         namespace: str | None = None,
         version: str | None = None,
-    ) -> None:
+    ) -> RebuildResult:
         """从给定 active 快照重建一个索引 Scope。"""
 
 
@@ -224,25 +234,40 @@ class KnowledgeReindexService:
         try:
             rebuilder = getattr(self._index_writer, "rebuild", None)
             if callable(rebuilder):
-                await cast(Callable[..., Awaitable[None]], rebuilder)(
+                result = await cast(Callable[..., Awaitable[RebuildResult | None]], rebuilder)(
                     artifacts,
                     wiki_id=resolved_scope.wiki_id,
                     namespace=resolved_scope.namespace,
                     version=resolved_scope.version,
                 )
-                indexed_count = len(artifacts)
+                if result is not None:
+                    indexed_count = result.indexed_count
+                    if result.failed_artifact_ids:
+                        warnings.append(
+                            f"REBUILD_PARTIAL: {len(result.failed_artifact_ids)} artifacts failed"
+                        )
+                        for art_id in result.failed_artifact_ids:
+                            errors.append(f"rebuild_failed {art_id}")
+                else:
+                    indexed_count = len(artifacts)
             else:
                 warnings.append("INDEX_REBUILD_UNSUPPORTED_USING_UPSERT")
                 for batch in _batches(artifacts, batch_size):
-                    await self._index_writer.upsert(batch)
-                    indexed_count += len(batch)
+                    upsert_result = await self._index_writer.upsert(batch)
+                    if isinstance(upsert_result, dict):
+                        indexed_count += upsert_result.get("ok", 0)
+                        for doc_id, msg in upsert_result.get("errors", []):
+                            errors.append(f"upsert_failed {doc_id}: {msg}")
+                    else:
+                        indexed_count += len(batch)
         except Exception as error:  # noqa: BLE001 - index is a rebuildable derivative
             errors.append(f"index_write_failed: {type(error).__name__}: {error}")
+            status = ReindexStatus.PARTIAL if indexed_count > 0 else ReindexStatus.FAILED
             return KnowledgeReindexResult(
                 operation_id=operation_id,
                 scope=resolved_scope,
                 dry_run=False,
-                status=ReindexStatus.FAILED,
+                status=status,
                 artifacts_discovered=len(artifacts),
                 artifacts_indexed=indexed_count,
                 batches=batches,
@@ -355,6 +380,7 @@ __all__ = [
     "KnowledgeIndexRebuilder",
     "KnowledgeReindexResult",
     "KnowledgeReindexService",
+    "RebuildResult",
     "ReindexScope",
     "ReindexStatus",
 ]
