@@ -1,5 +1,4 @@
 """schema.py 单元测试（构造 + 字段定义）。"""
-import pytest
 
 import zvec
 
@@ -26,7 +25,6 @@ from src.dao.emb.schema import (
     FIELD_VERSION_SUPPORT,
     get_collection_schema,
 )
-
 
 # 17 字段常量必须全在
 ALL_FIELDS = {
@@ -72,8 +70,13 @@ class TestSchemaConstruction:
         sparse = next(v for v in s.vectors if v.name == FIELD_SPARSE_EMBEDDING)
         assert dense.data_type == zvec.DataType.VECTOR_FP32
         assert sparse.data_type == zvec.DataType.SPARSE_VECTOR_FP32
-        # 维度：local embedder → 384
-        assert dense.dimension == 384
+        # 维度与配置一致
+        c = cfg.get_config()
+        if c.embedder.type == "bailian":
+            expected_dim = c.embedder.bailian.dimension
+        else:
+            expected_dim = c.embedder.local.dimension
+        assert dense.dimension == expected_dim
         # sparse 没固定维度
         assert sparse.dimension == 0
 
