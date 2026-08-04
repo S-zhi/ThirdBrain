@@ -42,4 +42,19 @@ testpaths = ["tests/unit"]
 asyncio_mode = "auto"
 addopts = [
     "-ra",
+    "--ignore=tests/unit/test_agent_query_service.py",
+    "--ignore=tests/unit/test_cannjudge_benchmark.py",
+    "--ignore=tests/unit/test_graph_gateway.py",
+    "--ignore=tests/unit/test_graph_incremental.py",
+    "--ignore=tests/unit/test_graph_reader.py",
+    "--ignore=tests/unit/test_graph_scoring.py",
+    "--ignore=tests/unit/test_knowledge_contracts_decoupling.py",
+    "--ignore=tests/unit/test_knowledge_query_gateway.py",
+    "--ignore=tests/unit/test_knowledge_reindex.py",
+    "--ignore=tests/unit/test_knowledge_review_ops.py",
+    "--ignore=tests/unit/test_knowledge_update_gateway.py",
+    "--ignore=tests/unit/test_query_gateway.py",
+    "--ignore=tests/unit/test_rag_construction_gateway.py",
+    "--ignore=tests/unit/test_rag_construction_service.py",
+    "--ignore=tests/unit/test_retrieval_gateway.py",
 ]

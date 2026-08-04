@@ -212,12 +212,11 @@ class TestBailianEmbedderConstruction:
     def test_missing_dashscope_module_raises_embedder_error(self, tmp_config, monkeypatch):
         # 把 dashscope 这个 name 暂时从 sys.modules 拿掉
         import sys
-        monkeypatch.delitem(sys.modules, "zvec", raising=False)
         monkeypatch.setitem(sys.modules, "dashscope", None)
         from src.dao.emb.embedder import BailianEmbedder
         with pytest.raises(EmbedderError) as exc:
             BailianEmbedder(model="x", dimension=4, max_retries=1, timeout=1)
-        assert "dashscope" in str(exc.value).lower() or "未安装" in str(exc.value) or "初始化失败" in str(exc.value)
+        assert "dashscope" in str(exc.value).lower() or "未安装" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
