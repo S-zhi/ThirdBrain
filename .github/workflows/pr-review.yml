@@ -12,6 +12,7 @@ jobs:
   review:
     name: Review pull request
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     permissions:
       contents: read
       pull-requests: write
@@ -29,3 +30,4 @@ jobs:
           bypass_label: jules-override
           status_context: jules/review
           rules_file: .github/jules-review-rules.md
+          timeout_minutes: 300
