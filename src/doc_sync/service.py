@@ -230,91 +230,6 @@ class DocumentSyncService:
             }
         )
 
-
-    async def _fetch_one_ref(
-        self,
-        adapter: SourceAdapter,
-        context: AdapterContext,
-        ref: DocumentRef,
-    ) -> tuple[DocumentRef, ParsedDocument | None, int | None, str | None]:
-        """获取并解析一条引用，把异常限制在单文档结果内。"""
-        try:
-            if ref.source_id != adapter.source_id:
-                raise DocumentSyncError(
-                    f"引用 source_id {ref.source_id!r} 与 Adapter {adapter.source_id!r} 不一致"
-                )
-            result = await adapter.fetch(ref, context)
-            if result.status_code in {404, 410}:
-                return ref, None, result.status_code, None
-            document = adapter.parse(ref, result)
-            if document.source_id != ref.source_id:
-                raise DocumentSyncError("Adapter parse 改变了 source_id 稳定身份")
-            return ref, document, None, None
-        except Exception as exc:  # noqa: BLE001
-            return ref, None, None, f"{type(exc).__name__}: {exc}"
-
-    def _process_discovery_result(
-        self,
-        adapter: SourceAdapter,
-        ref: DocumentRef,
-        document: ParsedDocument | None,
-        missing_status: int | None,
-        error: str | None,
-        completed_ids: set[str],
-        pending: dict[str, DocumentRef],
-        parsed: dict[str, tuple[DocumentRef, ParsedDocument]],
-        missing: dict[str, tuple[DocumentRef, int]],
-        failed: dict[str, tuple[DocumentRef, str]],
-        maximum: int,
-    ) -> None:
-        """处理单个文档的发现结果，合并规范化 ID 并收集新发现的引用。"""
-        completed_ids.add(ref.document_id)
-        if missing_status is not None:
-            missing[ref.document_id] = (ref, missing_status)
-            return
-        if error is not None or document is None:
-            failed[ref.document_id] = (ref, error or "未知解析错误")
-            return
-        canonical_id = document.document_id
-        completed_ids.add(canonical_id)
-        # 同一批次可能同时包含重定向前后的引用；后续结果按稳定
-        # canonical document_id 合并，并优先保留已有路径提示。
-        pending.pop(canonical_id, None)
-        current = parsed.get(canonical_id)
-        if current is None:
-            parsed[canonical_id] = (ref, document)
-        else:
-            current_ref, _ = current
-            current_score = (
-                int(current_ref.document_id == canonical_id),
-                int(current_ref.relative_path_hint is not None),
-                len(Path(current_ref.relative_path_hint or "").parts),
-            )
-            candidate_score = (
-                int(ref.document_id == canonical_id),
-                int(ref.relative_path_hint is not None),
-                len(Path(ref.relative_path_hint or "").parts),
-            )
-            if candidate_score > current_score:
-                parsed[canonical_id] = (ref, document)
-        for discovered in adapter.discover_refs(document):
-            if discovered.source_id != adapter.source_id:
-                raise DocumentSyncError(
-                    f"发现引用 source_id {discovered.source_id!r} 与 Adapter "
-                    f"{adapter.source_id!r} 不一致"
-                )
-            if discovered.document_id in completed_ids:
-                continue
-            existing_pending = pending.get(discovered.document_id)
-            if existing_pending is None:
-                if len(completed_ids) + len(pending) < maximum:
-                    pending[discovered.document_id] = discovered
-            else:
-                pending[discovered.document_id] = self._merge_ref(
-                    existing_pending,
-                    discovered,
-                )
-
     async def _discover(
         self,
         adapter: SourceAdapter,
@@ -349,6 +264,25 @@ class DocumentSyncService:
         # 并发上限；扩大到 concurrency * 4 会同时打开过多页面并触发站点限流。
         batch_size = max(1, self.config.http_defaults.concurrency)
 
+        async def fetch_one(
+            ref: DocumentRef,
+        ) -> tuple[DocumentRef, ParsedDocument | None, int | None, str | None]:
+            """获取并解析一条引用，把异常限制在单文档结果内。"""
+            try:
+                if ref.source_id != adapter.source_id:
+                    raise DocumentSyncError(
+                        f"引用 source_id {ref.source_id!r} 与 Adapter {adapter.source_id!r} 不一致"
+                    )
+                result = await adapter.fetch(ref, context)
+                if result.status_code in {404, 410}:
+                    return ref, None, result.status_code, None
+                document = adapter.parse(ref, result)
+                if document.source_id != ref.source_id:
+                    raise DocumentSyncError("Adapter parse 改变了 source_id 稳定身份")
+                return ref, document, None, None
+            except Exception as exc:  # noqa: BLE001
+                return ref, None, None, f"{type(exc).__name__}: {exc}"
+
         while pending and len(completed_ids) < maximum:
             batch_ids = [
                 document_id for document_id in pending if document_id not in completed_ids
@@ -356,23 +290,54 @@ class DocumentSyncService:
             if not batch_ids:
                 break
             batch = [pending.pop(document_id) for document_id in batch_ids]
-            results = await asyncio.gather(
-                *(self._fetch_one_ref(adapter, context, ref) for ref in batch)
-            )
+            results = await asyncio.gather(*(fetch_one(ref) for ref in batch))
             for ref, document, missing_status, error in results:
-                self._process_discovery_result(
-                    adapter,
-                    ref,
-                    document,
-                    missing_status,
-                    error,
-                    completed_ids,
-                    pending,
-                    parsed,
-                    missing,
-                    failed,
-                    maximum,
-                )
+                completed_ids.add(ref.document_id)
+                if missing_status is not None:
+                    missing[ref.document_id] = (ref, missing_status)
+                    continue
+                if error is not None or document is None:
+                    failed[ref.document_id] = (ref, error or "未知解析错误")
+                    continue
+                canonical_id = document.document_id
+                completed_ids.add(canonical_id)
+                # 同一批次可能同时包含重定向前后的引用；后续结果按稳定
+                # canonical document_id 合并，并优先保留已有路径提示。
+                pending.pop(canonical_id, None)
+                current = parsed.get(canonical_id)
+                if current is None:
+                    parsed[canonical_id] = (ref, document)
+                else:
+                    current_ref, _ = current
+                    current_score = (
+                        int(current_ref.document_id == canonical_id),
+                        int(current_ref.relative_path_hint is not None),
+                        len(Path(current_ref.relative_path_hint or "").parts),
+                    )
+                    candidate_score = (
+                        int(ref.document_id == canonical_id),
+                        int(ref.relative_path_hint is not None),
+                        len(Path(ref.relative_path_hint or "").parts),
+                    )
+                    if candidate_score > current_score:
+                        parsed[canonical_id] = (ref, document)
+                for discovered in adapter.discover_refs(document):
+                    if discovered.source_id != adapter.source_id:
+                        raise DocumentSyncError(
+                            f"发现引用 source_id {discovered.source_id!r} 与 Adapter "
+                            f"{adapter.source_id!r} 不一致"
+                        )
+                    if discovered.document_id in completed_ids:
+                        continue
+                    existing_pending = pending.get(discovered.document_id)
+                    if existing_pending is None:
+                        if len(completed_ids) + len(pending) < maximum:
+                            pending[discovered.document_id] = discovered
+                    else:
+                        pending[discovered.document_id] = self._merge_ref(
+                            existing_pending,
+                            discovered,
+                        )
         return parsed, missing, failed
 
     def _decide_document(

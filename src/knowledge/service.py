@@ -23,15 +23,7 @@ from src.knowledge.models import (
     WikiUpdateInput,
     utc_now,
 )
-import asyncio
-import logging
-import traceback
-from pymongo.errors import PyMongoError
-from openai import OpenAIError
-from src.knowledge.openai_extractor import KnowledgeExtractionError
 from src.knowledge.validation import validate_extraction
-
-logger = logging.getLogger(__name__)
 
 
 class KnowledgeUpdateService:
@@ -114,12 +106,7 @@ class KnowledgeUpdateService:
         ):
             try:
                 await self._index_writer.upsert(tuple(published_for_index))
-            except Exception as error:  # noqa: BLE001 - 索引是可重建派生物，不能回滚发布。
-                logger.warning(
-                    "knowledge.update.index_upsert_failed: %s",
-                    str(error),
-                    exc_info=True,
-                )
+            except Exception:  # noqa: BLE001 - 索引是可重建派生物，不能回滚发布。
                 index_error = True
                 next_actions.append("rebuild_knowledge_indexes")
         elif resolved_options.update_indexes and published_for_index:
@@ -219,16 +206,13 @@ class KnowledgeUpdateService:
             compiler_fingerprint=options.compiler_fingerprint,
             created_at=utc_now(),
         )
-        phase = "list_active_artifacts"
         try:
             candidates = await self._repository.list_active_artifacts(
                 document.wiki_id,
                 document.namespace,
                 document.version,
             )
-            phase = "extract"
             extraction = await self._extractor.extract(document, candidates)
-            phase = "validate_metadata"
             metadata_validation = self._validate_extraction_metadata(extraction, options, document)
             if not metadata_validation.passed:
                 return (
@@ -240,7 +224,6 @@ class KnowledgeUpdateService:
                     ),
                     (),
                 )
-            phase = "validate"
             validation = validate_extraction(document, extraction)
             if not validation.passed:
                 return (
@@ -252,7 +235,6 @@ class KnowledgeUpdateService:
                     ),
                     (),
                 )
-            phase = "resolve"
             resolutions = tuple(
                 self._merge_planner.resolve(
                     draft,
@@ -261,11 +243,8 @@ class KnowledgeUpdateService:
                 )
                 for draft in extraction.artifacts
             )
-            phase = "revisions"
             revisions = self._artifact_revisions(source_revision, resolutions, extraction, options)
-            phase = "stage"
             staging_id = await self._repository.stage(operation_id, source_revision, revisions)
-            phase = "publish"
             try:
                 published = await self._repository.publish(staging_id)
             except Exception:
@@ -290,27 +269,7 @@ class KnowledgeUpdateService:
                 ),
                 published,
             )
-        except asyncio.CancelledError:
-            raise
-        except (KnowledgeExtractionError, OpenAIError, PyMongoError, ValueError, TypeError) as error:
-            if isinstance(error, (KnowledgeExtractionError, OpenAIError)):
-                code = "KNOWLEDGE_UPDATE_LLM_ERROR"
-            elif isinstance(error, PyMongoError):
-                code = "KNOWLEDGE_UPDATE_MONGO_ERROR"
-            elif isinstance(error, (ValueError, TypeError)):
-                if phase in ("resolve", "revisions"):
-                    code = "KNOWLEDGE_UPDATE_PLANNER_ERROR"
-                else:
-                    code = "KNOWLEDGE_UPDATE_VALIDATION_ERROR"
-            else:
-                code = "KNOWLEDGE_UPDATE_FAILED"
-
-            logger.warning(
-                "knowledge.update.failed document_id=%s error_type=%s traceback=%s",
-                document.document_id,
-                type(error).__name__,
-                traceback.format_exc()[-2000:],
-            )
+        except Exception:  # noqa: BLE001 - 不向调用方泄露 provider / 存储内部细节。
             return (
                 DocumentUpdateOutcome(
                     document_id=document.document_id,
@@ -320,8 +279,8 @@ class KnowledgeUpdateService:
                         passed=False,
                         issues=(
                             ValidationIssue(
-                                code=code,
-                                message=f"{type(error).__name__}: {str(error)[:200]}",
+                                code="KNOWLEDGE_UPDATE_FAILED",
+                                message="知识更新失败，原始 Source 未发布",
                                 document_id=document.document_id,
                             ),
                         ),
@@ -329,9 +288,6 @@ class KnowledgeUpdateService:
                 ),
                 (),
             )
-        except Exception as error:
-            logger.exception("knowledge.update.unexpected_error document_id=%s", document.document_id)
-            raise
 
     @staticmethod
     def _artifact_revisions(

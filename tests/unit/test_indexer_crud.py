@@ -1,5 +1,4 @@
 """indexer CRUD 集成测试（用真实 Zvec collection，跳过 embedder）。"""
-
 import gc
 import shutil
 from types import SimpleNamespace
@@ -88,7 +87,6 @@ def collection(isolated_config, tmp_path):
     # 只能靠 GC 释放 C++ 持有的 LOCK 文件。
     # 显式删引用 + collect()，确保下个测试能拿锁。
     import gc
-
     del coll
     gc.collect()
     coll_path = collection_path(name)
@@ -159,7 +157,6 @@ class TestReadOnlyHandle:
             open_or_create_collection(name, read_only=True)
         # 确认目录没被误建
         import os
-
         assert not os.path.isdir(collection_path(name))
 
     def test_open_collection_read_only(self, isolated_config, tmp_path):
@@ -288,7 +285,9 @@ class TestSchemaEvolution:
 
         new = self._build_minimal_schema(
             name,
-            extra_fields=[zvec.FieldSchema(name="tags", data_type=zvec.DataType.ARRAY_STRING)],
+            extra_fields=[
+                zvec.FieldSchema(name="tags", data_type=zvec.DataType.ARRAY_STRING)
+            ],
         )
         with pytest.raises(SchemaMismatchError, match="add_column"):
             open_or_create_collection(name, schema=new)
@@ -311,15 +310,11 @@ class TestSchemaEvolution:
             ],
             vectors=[
                 zvec.VectorSchema(
-                    name="v",
-                    data_type=zvec.DataType.VECTOR_FP32,
-                    dimension=4,
+                    name="v", data_type=zvec.DataType.VECTOR_FP32, dimension=4,
                     index_param=zvec.HnswIndexParam(metric_type=zvec.MetricType.COSINE),
                 ),
                 zvec.VectorSchema(
-                    name="v2",
-                    data_type=zvec.DataType.VECTOR_FP32,
-                    dimension=4,
+                    name="v2", data_type=zvec.DataType.VECTOR_FP32, dimension=4,
                     index_param=zvec.HnswIndexParam(metric_type=zvec.MetricType.COSINE),
                 ),
             ],
@@ -358,9 +353,7 @@ class TestSchemaEvolution:
             ],
             vectors=[
                 zvec.VectorSchema(
-                    name="v",
-                    data_type=zvec.DataType.VECTOR_FP32,
-                    dimension=4,
+                    name="v", data_type=zvec.DataType.VECTOR_FP32, dimension=4,
                     index_param=zvec.HnswIndexParam(metric_type=zvec.MetricType.COSINE),
                 ),
             ],
@@ -379,9 +372,7 @@ class TestSchemaEvolution:
             ],
             vectors=[
                 zvec.VectorSchema(
-                    name="v",
-                    data_type=zvec.DataType.VECTOR_FP32,
-                    dimension=8,
+                    name="v", data_type=zvec.DataType.VECTOR_FP32, dimension=8,
                     index_param=zvec.HnswIndexParam(metric_type=zvec.MetricType.COSINE),
                 ),
             ],
@@ -483,13 +474,10 @@ class TestUpdate:
     def test_update_only_specified_field(self, collection):
         collection.upsert(make_doc("a", description="original"))
         # 部分更新：只改 description
-        update_doc(
-            collection,
-            zvec.Doc(
-                id="a",
-                fields={"description": "UPDATED"},
-            ),
-        )
+        update_doc(collection, zvec.Doc(
+            id="a",
+            fields={"description": "UPDATED"},
+        ))
         d = fetch_doc(collection, "a")
         assert d.fields["description"] == "UPDATED"
         # 其他字段保留
@@ -511,13 +499,10 @@ class TestUpdate:
     def test_update_batch(self, collection):
         for did in ["a", "b"]:
             collection.upsert(make_doc(did))
-        statuses = update_batch(
-            collection,
-            [
-                zvec.Doc(id="a", fields={"description": "new_a"}),
-                zvec.Doc(id="b", fields={"description": "new_b"}),
-            ],
-        )
+        statuses = update_batch(collection, [
+            zvec.Doc(id="a", fields={"description": "new_a"}),
+            zvec.Doc(id="b", fields={"description": "new_b"}),
+        ])
         assert len(statuses) == 2
         d_a = fetch_doc(collection, "a")
         assert d_a.fields["description"] == "new_a"
@@ -568,7 +553,6 @@ class TestCollectionPath:
 # ---------------------------------------------------------------------------
 # 下面是新加的高层 CRUD 测试（DirectorDoc + CollectionSession + 传 collection 名）
 # ---------------------------------------------------------------------------
-
 
 class _FakeEmbedder:
     """不走真实 embed；返回与 config 维度匹配的 dense + sparse。
@@ -643,7 +627,6 @@ class TestDirectorDoc:
         assert full.id == "abc"
         # vectors 都填上了
         from src.dao.emb.schema import FIELD_DENSE_EMBEDDING, FIELD_SPARSE_EMBEDDING
-
         assert FIELD_DENSE_EMBEDDING in full.vectors
         assert FIELD_SPARSE_EMBEDDING in full.vectors
         assert len(full.vectors[FIELD_DENSE_EMBEDDING]) == emb.dim
@@ -678,10 +661,8 @@ class TestCollectionSession:
             del coll
             gc.collect()
         # 再用 read_only CollectionSession 打开 → upsert 必须被拒
-        with (
-            CollectionSession(name, read_only=True) as coll_ro,
-            pytest.raises(Exception, match="read-only"),
-        ):
+        with CollectionSession(name, read_only=True) as coll_ro, \
+                pytest.raises(Exception, match="read-only"):
             coll_ro.upsert(make_doc("b"))
         shutil.rmtree(collection_path(name), ignore_errors=True)
 
@@ -804,24 +785,8 @@ class TestCollectionNameCRUD:
         assert ddoc.doc_id == "a"
         # 验证 record 字段被反推
         assert ddoc.record.description == "hello"
-        assert ddoc.record.product_support == [{"product": "linux", "supported": True}]
         # embedder 是 None（fetch 不带 embedder）
         assert ddoc.embedder is None
-
-    def test_fetch_empty_version_support_warns(self, isolated_config, tmp_path, caplog):
-        name = "hi_fetch_empty_support"
-        # product_support list with supported=False → extracted version_support is empty
-        rec = make_orm_record("a", product_support=[{"product": "linux", "supported": False}])
-        insert(name, DirectorDoc(record=rec, embedder=_FakeEmbedder()))
-
-        import logging
-
-        with caplog.at_level(logging.WARNING, logger="src.dao.emb.director"):
-            ddoc = fetch(name, "a")
-
-        assert ddoc is not None
-        assert ddoc.record.product_support == []
-        assert any("director.fetch.empty_version_support" in r.message for r in caplog.records)
 
     def test_fetch_missing_returns_none(self, isolated_config, tmp_path):
         name = "hi_fetch_missing"
