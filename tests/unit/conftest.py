@@ -83,7 +83,7 @@ def isolated_config(tmp_path, monkeypatch):
     yaml_path = tmp_path / "config.yaml"
     yaml_template = """\
 embedder:
-  type: bailian
+  type: local
   bailian:
     model: qwen3.7-text-embedding
     dimension: 2048
