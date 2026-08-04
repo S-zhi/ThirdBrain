@@ -313,12 +313,10 @@ class TestOpenOrCreate:
         from dataclasses import replace
         import config
         # 模拟已有 collection 目录
-        existing = Path(collection_path())
-        existing.mkdir(parents=True, exist_ok=True)
+        existing = tmp_path / "zvec" / "unit_test"
+        existing.mkdir(parents=True)
         # 让 zvec.open 返回一个假对象
         fake_coll = MagicMock()
-        from src.dao.emb.schema import get_collection_schema
-        fake_coll.schema = get_collection_schema()
         with patch("src.dao.emb.indexer.zvec.open", return_value=fake_coll) as mock_open:
             coll = open_or_create_collection()
         assert coll is fake_coll
@@ -330,8 +328,8 @@ class TestOpenOrCreate:
     def test_existing_path_but_open_fails(self, use_tmp_config, tmp_path):
         from dataclasses import replace
         import config
-        existing = Path(collection_path())
-        existing.mkdir(parents=True, exist_ok=True)
+        existing = tmp_path / "zvec" / "unit_test"
+        existing.mkdir(parents=True)
         with patch("src.dao.emb.indexer.zvec.open", side_effect=RuntimeError("corrupted")):
             with pytest.raises(CollectionNotFoundError) as exc:
                 open_or_create_collection()
