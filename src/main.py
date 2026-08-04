@@ -1,5 +1,6 @@
 """RAG With Cold API Documents 的 FastAPI 应用入口。"""
 
+import asyncio
 import inspect
 import logging
 import os
@@ -132,6 +133,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             QueryRecordDAO(mongo),
             collection_name=collection_name,
             heatmap_counter=heatmap_counter,
+            app_state=app.state,
         )
         knowledge_repository = MongoKnowledgeRepository(mongo)
         await knowledge_repository.ensure_indexes()
@@ -192,6 +194,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # 1. 优雅等待所有未完成的 heatmap task
+        pending = getattr(app.state, "pending_heatmap_tasks", set())
+        if pending:
+            logger.info("Awaiting %d pending heatmap tasks during shutdown...", len(pending))
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True),
+                    timeout=10.0,  # 最多等 10s
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "heatmap.tasks.cancelled_during_shutdown count=%d",
+                    len(pending),
+                )
+            except Exception as error:  # noqa: BLE001 - 兜底捕获，防止影响其他组件关闭
+                logger.warning(
+                    "heatmap.tasks.error_during_shutdown error_type=%s",
+                    type(error).__name__,
+                )
+
+        # 2. 关闭 LLM client
         llm_client = getattr(app.state, "knowledge_llm_client", None)
         if llm_client is not None:
             try:
@@ -200,8 +223,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     await close_result
             except Exception as error:  # noqa: BLE001 - 关闭期允许降级。
                 logger.warning("knowledge_update.llm_close_error type=%s", type(error).__name__)
+        # 3. 关闭 Redis
         if redis_connected:
             await redis_db.close()
+        # 4. 关闭 MongoDB
         if mongo_connected:
             await mongo.close()
 
