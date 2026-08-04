@@ -351,45 +351,54 @@ def search(
 # ---------------------------------------------------------------------------
 
 def _to_results(raw: Any) -> list[SearchResult]:
-    """把 zvec 的 query 返回值转成 :class:`SearchResult` 列表。
+    """把 zvec 的 query 返回值（list of Doc-like）转成 :class:`SearchResult` 列表。
 
-    兼容 zvec 多种返回 shape:
-    - list of Doc-like  ← 最常见
-    - dict[doc_id, Doc-like]  ← fetch 风格
+    zvec 不同版本（0.5 / 0.6）返回结构略有不同：有时是 list of dict，有时
+    是 list of Doc-like 对象，有时是 dict（fetch 风格）。这里做宽松转换，
+    尽量兼容：
+    - 优先用 ``.id`` 属性，再退到 ``dict.get("id")``。
+    - score 缺省 0.0（zvec 有时不返回原始 score）。
+    - fields 缺省 ``{}``。
+    - 兼容 fetch 风格 ``{doc_id: {"id": ..., "fields": {...}}}``。
+
+    Args:
+        raw: zvec 任意 query/fetch 返回值。
+
+    Returns:
+        :class:`SearchResult` 列表；空输入返空 list，**不**抛错。
     """
-    if raw is None:
-        return []
-
-    # fetch 风格:{doc_id: doc-like}
-    if isinstance(raw, dict) and all(
-        isinstance(v, dict) or hasattr(v, "id") for v in raw.values()
-    ):
-        items = list(raw.values())
-    elif isinstance(raw, (list, tuple)) or (hasattr(raw, "__iter__") and not isinstance(raw, (str, bytes, dict))):
-        try:
-            items = list(raw)
-        except TypeError:
-            return []
-    else:
-        return []
-
     out: list[SearchResult] = []
-    for item in items:
+    if raw is None:
+        return out
+    for item in raw:
+        # 优先 .id 属性，再退到 dict.get("id")
         if isinstance(item, dict):
-            doc_id = item.get("id") or item.get("doc_id") or getattr(item, "id", None)
+            doc_id = item.get("id", None) or getattr(item, "id", None)
+        else:
+            doc_id = getattr(item, "id", None)
+        if doc_id is None:
+            continue
+
+        if isinstance(item, dict):
+            # item.get("score") 可能返回 None（zvec 有时不返回 score），统一回退到 0.0
             score = item.get("score") or 0.0
             fields = item.get("fields", {}) or {}
         else:
-            doc_id = getattr(item, "id", None)
             score = getattr(item, "score", 0.0) or 0.0
             fields = getattr(item, "fields", None) or {}
 
-        if doc_id is None:
-            continue
+        # 兼容 fetch 风格：{"doc_id": {"id": ..., "fields": {...}}}
+        if (
+            isinstance(fields, dict)
+            and len(fields) == 1
+            and isinstance(next(iter(fields.values())), dict)
+        ):
+            inner = next(iter(fields.values()))
+            fields = inner.get("fields", inner) if isinstance(inner, dict) else {}
 
         out.append(SearchResult(
             doc_id=str(doc_id),
             score=float(score),
-            fields=dict(fields) if isinstance(fields, dict) else {},
+            fields=dict(fields),
         ))
     return out
