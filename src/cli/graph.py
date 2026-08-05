@@ -14,8 +14,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from src.dao.mongo.database import MongoDatabase
 from src.knowledge.graph import (
@@ -28,6 +30,21 @@ from src.knowledge.graph import (
     iter_graph_export_batches,
 )
 from src.knowledge.mongo_repository import MongoKnowledgeRepository
+
+
+def _write_atomic_text(path: Path, content: str) -> None:
+    """用 temp + os.replace 原子写，且发生异常时清理临时文件。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -316,8 +333,7 @@ async def _run_export(args: argparse.Namespace) -> dict[str, object]:
                 payload = batch.to_payload()
 
                 def _write_one(payload: dict, path: Path) -> None:
-                    with open(path, "w", encoding="utf-8") as fp:
-                        json.dump(payload, fp, ensure_ascii=False, indent=2)
+                    _write_atomic_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
                 await asyncio.to_thread(_write_one, payload, file_path)
                 manifest["batches"].append(
@@ -332,8 +348,9 @@ async def _run_export(args: argparse.Namespace) -> dict[str, object]:
                 manifest["total_edges"] = cumulative_edges
 
             def _write_manifest() -> None:
-                with open(out_dir / "manifest.json", "w", encoding="utf-8") as fp:
-                    json.dump(manifest, fp, ensure_ascii=False, indent=2)
+                _write_atomic_text(
+                    out_dir / "manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2)
+                )
 
             await asyncio.to_thread(_write_manifest)
             return {
@@ -397,8 +414,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # 单文件模式
             text = result["text"]
             if args.output:
-                with open(args.output, "w", encoding="utf-8") as fp:
-                    fp.write(text)
+                _write_atomic_text(Path(args.output), text)
                 print(
                     json.dumps(
                         {
