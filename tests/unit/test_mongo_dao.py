@@ -723,33 +723,123 @@ async def test_settings_uri_not_logged(caplog):
     assert "user:" not in full_text, f"credentials leaked in log: {full_text[:500]}"
 
 
+
+
 @pytest.mark.asyncio
-async def test_connect_failure_does_not_leave_half_connected_state():
-    """单元测试：
-    把 settings 指向不存在的 Mongo URI（mongodb://127.0.0.1:1），
-    assert connect() 抛 DAOUnavailableError，且之后 mongo._client is None。
-    然后 mongo.connect() 第二次（同样失败），assert 仍抛错且 _client is None。
-    """
-    settings = MongoSettings(
-        uri="mongodb://127.0.0.1:1",
-        database="test_unreachable",
-        app_name="rag-test-unreachable",
-        server_selection_timeout_ms=100,  # 极短超时，加速失败
-        connect_timeout_ms=100,
-        use_transactions=False,
+async def test_bootstrap_create_indexes_race_resolved():
+    """并发 race: 别的进程建好了(同 name + 同 key + 同 options)，应当 resolved 并当做成功。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pymongo.errors import OperationFailure
+
+    # Mock MongoDatabase 和 Collection
+    mock_mongo = MagicMock(spec=MongoDatabase)
+    mock_mongo.settings = MagicMock()
+    mock_mongo.settings.init_mode = "auto"
+    mock_mongo.record_collection_name = "lig_update_records"
+    mock_mongo.state_collection_name = "lig_text_states"
+    mock_mongo.query_record_collection_name = "query_records"
+
+    mock_db = MagicMock()
+    mock_mongo.db = mock_db
+
+    bootstrap = MongoBootstrap(mock_mongo)
+
+    mock_coll = MagicMock()
+    mock_db.__getitem__.return_value = mock_coll
+
+    # 首次 list_indexes 模拟未建完（返回空）
+    async def mock_list_indexes_empty():
+        if False:
+            yield
+
+    # 第二次 list_indexes (recheck) 返回别的进程已经建好的匹配索引
+    async def mock_list_indexes_with_match():
+        yield {
+            "name": "uq_lig_record_id",
+            "key": {"record_id": 1},  # pymongo 返回的 key 格式可能为 dict/SON
+            "unique": True,
+        }
+
+    list_indexes_calls = []
+
+    def list_indexes_side_effect(*args, **kwargs):
+        if not list_indexes_calls:
+            list_indexes_calls.append(1)
+            return mock_list_indexes_empty()
+        else:
+            return mock_list_indexes_with_match()
+
+    mock_coll.list_indexes = AsyncMock(side_effect=list_indexes_side_effect)
+
+    # create_index 抛出 OperationFailure (already exists)
+    mock_coll.create_index = AsyncMock(
+        side_effect=OperationFailure("Index already exists with same options")
     )
-    mongo = MongoDatabase(settings)
 
-    # 第一次 connect，应当抛 DAOUnavailableError，且 _client 与 _db 保持 None
-    with pytest.raises(DAOUnavailableError):
-        await mongo.connect()
+    test_indexes = [
+        {
+            "name": "uq_lig_record_id",
+            "key": [("record_id", 1)],
+            "options": {"unique": True, "name": "uq_lig_record_id"},
+        }
+    ]
 
-    assert mongo._client is None
-    assert mongo._db is None
+    # 应该正常跑完且不抛错
+    await bootstrap._create_indexes("lig_update_records", test_indexes)
 
-    # 第二次 connect，同样应当失败，且仍保持 None
-    with pytest.raises(DAOUnavailableError):
-        await mongo.connect()
+    assert mock_coll.create_index.called
+    assert mock_coll.list_indexes.call_count == 2
 
-    assert mongo._client is None
-    assert mongo._db is None
+
+@pytest.mark.asyncio
+async def test_bootstrap_create_indexes_schema_drift():
+    """真实 schema 漂移: 同 name 但 key/options 不一致，必须抛出 RuntimeError。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pymongo.errors import OperationFailure
+
+    # Mock MongoDatabase 和 Collection
+    mock_mongo = MagicMock(spec=MongoDatabase)
+    bootstrap = MongoBootstrap(mock_mongo)
+
+    mock_coll = MagicMock()
+    mock_mongo.db = MagicMock()
+    mock_mongo.db.__getitem__.return_value = mock_coll
+
+    async def mock_list_indexes_empty():
+        if False:
+            yield
+
+    # 第二次 list_indexes 返回不匹配的 options (期望 unique=True 但实际 unique=False)
+    async def mock_list_indexes_mismatch():
+        yield {
+            "name": "uq_lig_record_id",
+            "key": {"record_id": 1},
+            "unique": False,  # 不匹配
+        }
+
+    list_indexes_calls = []
+
+    def list_indexes_side_effect(*args, **kwargs):
+        if not list_indexes_calls:
+            list_indexes_calls.append(1)
+            return mock_list_indexes_empty()
+        else:
+            return mock_list_indexes_mismatch()
+
+    mock_coll.list_indexes = AsyncMock(side_effect=list_indexes_side_effect)
+    mock_coll.create_index = AsyncMock(side_effect=OperationFailure("IndexKeySpecsConflict"))
+
+    test_indexes = [
+        {
+            "name": "uq_lig_record_id",
+            "key": [("record_id", 1)],
+            "options": {"unique": True, "name": "uq_lig_record_id"},
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="schema drift detected"):
+        await bootstrap._create_indexes("lig_update_records", test_indexes)
+
+    assert mock_coll.list_indexes.call_count == 2

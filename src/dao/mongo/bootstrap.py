@@ -307,9 +307,31 @@ class MongoBootstrap:
                 ):
                     # 真有冲突 → 之前本地比对应该已经拦下；走到这里说明
                     # 本地拿到的 existing 快照过期了。重读一次确认状态。
+                    try:
+                        fresh_iter = await coll.list_indexes()
+                        fresh_indexes = {idx["name"]: idx async for idx in fresh_iter}
+                        if name in fresh_indexes:
+                            fresh_idx = fresh_indexes[name]
+                            if self._index_keys_match(
+                                fresh_idx.get("key"), key
+                            ) and self._index_options_match(fresh_idx, options):
+                                logger.info(
+                                    "mongo.index.race_resolved name=%s.%s",
+                                    collection_name,
+                                    name,
+                                )
+                                continue
+                    except Exception as recheck_exc:  # noqa: BLE001
+                        logger.warning(
+                            "mongo.index.recheck_failed name=%s.%s: %s",
+                            collection_name,
+                            name,
+                            recheck_exc,
+                        )
+
                     raise RuntimeError(
-                        f"index {collection_name}.{name} conflict detected at server: "
-                        f"{msg}; reread existing indexes to confirm and run migration"
+                        f"index {collection_name}.{name} schema drift detected: {msg}; "
+                        f"manual migration required"
                     ) from exc
                 raise
 
