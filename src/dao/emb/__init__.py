@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import zvec
+
+logger = logging.getLogger(__name__)
 
 from src.dao.emb.director import (
     CollectionSession,
@@ -196,13 +199,14 @@ def wait_for_index_ready(coll: zvec.Collection, timeout: float = 300.0) -> bool:
     while time.time() - start < timeout:
         try:
             stats = coll.stats
-        except Exception:
+        except Exception as error:
+            logger.warning("zvec.stats_unavailable error=%s", type(error).__name__)
             return False
-        completeness = stats.get("index_completeness", {}) if isinstance(stats, dict) else {}
+        completeness = getattr(stats, "index_completeness", None) or {}
         if not completeness:
             # 没有 vector 字段？认为就绪
             return True
-        if all(v >= 1.0 for v in completeness.values()):
+        if all(float(v) >= 1.0 for v in completeness.values()):
             return True
         time.sleep(0.5)
     return False

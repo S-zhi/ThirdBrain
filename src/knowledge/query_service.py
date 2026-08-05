@@ -74,13 +74,9 @@ class KnowledgeQueryService:
             return False
         if item.kind == ArtifactType.SOURCE and scope.language and item.language != scope.language:
             return False
-        if (
-            item.status == ArtifactStatus.ACTIVE
-            or item.status == ArtifactStatus.STALE
-            and options.include_stale
-        ):
-            pass
-        else:
+        if item.status not in (ArtifactStatus.ACTIVE, ArtifactStatus.STALE):
+            return False
+        if item.status == ArtifactStatus.STALE and not options.include_stale:
             return False
         requested_collections = set(scope.rag_collection_ids)
         return not requested_collections or bool(
