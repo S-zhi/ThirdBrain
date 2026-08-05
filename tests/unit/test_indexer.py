@@ -343,3 +343,83 @@ class TestOpenOrCreate:
             coll = open_or_create_collection()
         assert coll is fake_coll
         mock_create.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# wait_for_index_ready
+# ---------------------------------------------------------------------------
+
+class TestWaitForIndexReady:
+    def test_ready_immediately(self):
+        from src.dao.emb import wait_for_index_ready
+
+        class MockStats:
+            index_completeness = {"dense": 1.0, "sparse": 1.0}
+
+        coll = MagicMock()
+        coll.stats = MockStats()
+
+        assert wait_for_index_ready(coll, timeout=1.0) is True
+
+    def test_ready_after_retry(self):
+        from src.dao.emb import wait_for_index_ready
+        from unittest.mock import PropertyMock
+
+        class MockStats1:
+            index_completeness = {"dense": 0.5, "sparse": 1.0}
+
+        class MockStats2:
+            index_completeness = {"dense": 1.0, "sparse": 1.0}
+
+        coll = MagicMock()
+        # Mocking property 'stats' to return MockStats1 then MockStats2
+        type(coll).stats = PropertyMock(side_effect=[MockStats1(), MockStats2()])
+
+        # Patch time.sleep to avoid actual sleeping
+        with patch("time.sleep") as mock_sleep:
+            assert wait_for_index_ready(coll, timeout=5.0) is True
+            mock_sleep.assert_called_once_with(0.5)
+
+    def test_timeout_returns_false(self):
+        from src.dao.emb import wait_for_index_ready
+
+        class MockStats:
+            index_completeness = {"dense": 0.5, "sparse": 1.0}
+
+        coll = MagicMock()
+        coll.stats = MockStats()
+
+        with patch("time.sleep") as mock_sleep:
+            # wait_for_index_ready should timeout and return False
+            assert wait_for_index_ready(coll, timeout=0.1) is False
+
+    def test_exception_on_stats_returns_false(self):
+        from src.dao.emb import wait_for_index_ready
+        from unittest.mock import PropertyMock
+
+        coll = MagicMock()
+        type(coll).stats = PropertyMock(side_effect=RuntimeError("zvec connection error"))
+
+        assert wait_for_index_ready(coll, timeout=1.0) is False
+
+    def test_empty_completeness_returns_true(self):
+        from src.dao.emb import wait_for_index_ready
+
+        class MockStats:
+            index_completeness = {}
+
+        coll = MagicMock()
+        coll.stats = MockStats()
+
+        assert wait_for_index_ready(coll, timeout=1.0) is True
+
+    def test_missing_completeness_attribute_returns_true(self):
+        from src.dao.emb import wait_for_index_ready
+
+        class MockStats:
+            pass  # No index_completeness attribute at all
+
+        coll = MagicMock()
+        coll.stats = MockStats()
+
+        assert wait_for_index_ready(coll, timeout=1.0) is True

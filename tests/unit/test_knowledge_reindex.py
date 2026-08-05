@@ -339,3 +339,24 @@ async def test_in_memory_repository_exposes_only_catalog_active_revisions() -> N
     )
     listed = await repository.list_active_artifact_revisions()
     assert listed == (revision,)
+
+
+@pytest.mark.asyncio
+async def test_check_consistency_sync_handles_io_exception_gracefully() -> None:
+    """测试 check_consistency_sync 在 IO/锁失败时，不将 artifacts 标为 missing，并返回特定的 error 错误前缀。"""
+    from unittest.mock import patch
+    from src.knowledge.zvec_index import ZvecKnowledgeIndexWriter
+
+    artifacts = (_artifact(1), _artifact(2))
+    writer = ZvecKnowledgeIndexWriter()
+
+    with patch("src.knowledge.zvec_index.CollectionSession") as mock_session_cls:
+        mock_session_cls.return_value.__enter__.side_effect = OSError("collection locked")
+
+        result = await writer.check_consistency(artifacts)
+
+        assert result["expected_count"] == 2
+        assert result["present_count"] == 0
+        assert result["missing_artifact_ids"] == ()
+        assert result["error"] is not None
+        assert str(result["error"]).startswith("check_unavailable: OSError")

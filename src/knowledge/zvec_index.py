@@ -323,9 +323,9 @@ class ZvecKnowledgeIndexWriter:
             return {
                 "expected_count": len(expected_ids),
                 "present_count": 0,
-                "missing_artifact_ids": expected_ids,
+                "missing_artifact_ids": (),
                 "orphan_count": None,
-                "error": f"{type(error).__name__}: {error}",
+                "error": f"check_unavailable: {type(error).__name__}: {error}",
             }
         present_ids = set(present or {})
         return {
