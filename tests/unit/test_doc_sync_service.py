@@ -334,3 +334,175 @@ def test_multiple_sources_keep_targets_and_states_isolated(tmp_path: Path) -> No
     assert (tmp_path / "documents-b" / "doc.md").is_file()
     assert (tmp_path / "runtime" / "state" / "source-a.json").is_file()
     assert (tmp_path / "runtime" / "state" / "source-b.json").is_file()
+
+
+class BatchStaticOptions(BaseModel):
+    """定义批量测试来源的配置内容。"""
+    model_config = ConfigDict(extra="forbid")
+    docs: list[dict]
+
+
+class BatchStaticAdapter(SourceAdapter):
+    """提供多文档的静态测试来源。"""
+    adapter_type = "unit-batch-static"
+    config_model = BatchStaticOptions
+
+    def bootstrap(self, target_directory: Path) -> list[DocumentRef]:
+        return []
+
+    async def initial_refs(self) -> list[DocumentRef]:
+        return [
+            DocumentRef(
+                source_id=self.source_id,
+                document_id=doc["document_id"],
+                canonical_uri=doc["uri"],
+            )
+            for doc in self.options.docs
+        ]
+
+    async def fetch(
+        self,
+        ref: DocumentRef,
+        context: AdapterContext,
+    ) -> FetchResult:
+        doc = next(d for d in self.options.docs if d["document_id"] == ref.document_id)
+        return FetchResult(
+            requested_uri=ref.canonical_uri,
+            final_uri=ref.canonical_uri,
+            status_code=200,
+            content_type="text/plain",
+            body=doc["body"].encode(),
+            fetched_at=datetime.now(UTC),
+            response_hash="hash",
+        )
+
+    def parse(self, ref: DocumentRef, result: FetchResult) -> ParsedDocument:
+        doc = next(d for d in self.options.docs if d["document_id"] == ref.document_id)
+        artifact = f"# {doc['title']}\n\n{doc['body']}\n"
+        return ParsedDocument(
+            source_id=ref.source_id,
+            document_id=ref.document_id,
+            canonical_uri=ref.canonical_uri,
+            title=doc["title"],
+            normalized_content=artifact,
+            artifact_content=artifact,
+        )
+
+    def discover_refs(self, document: ParsedDocument) -> list[DocumentRef]:
+        return []
+
+    def propose_relative_path(
+        self,
+        document: ParsedDocument,
+    ) -> PurePosixPath:
+        return PurePosixPath(f"{document.document_id}.md")
+
+
+def test_batching_execution_and_resume_from(tmp_path: Path) -> None:
+    """测试增量同步的 --batch-size 和 --resume-from。"""
+    if BatchStaticAdapter.adapter_type not in AdapterFactory.available_types():
+        AdapterFactory.register(BatchStaticAdapter)
+
+    config = DocumentSyncConfig.model_validate(
+        {
+            "workspace_root": tmp_path,
+            "runtime": {"root_directory": "./runtime"},
+            "http_defaults": {"respect_robots_txt": False},
+            "sources": [
+                {
+                    "id": "batch-source",
+                    "target_directory": "./documents",
+                    "adapter": {
+                        "type": BatchStaticAdapter.adapter_type,
+                        "options": {
+                            "docs": [
+                                {"document_id": "doc-a", "title": "A", "body": "body-a", "uri": "memory://doc-a"},
+                                {"document_id": "doc-b", "title": "B", "body": "body-b", "uri": "memory://doc-b"},
+                                {"document_id": "doc-c", "title": "C", "body": "body-c", "uri": "memory://doc-c"},
+                            ]
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    service = DocumentSyncService(config)
+
+    # 第一批: batch_size=2, 无 resume_from, 应该获取 doc-a 和 doc-b
+    manifest1, _ = asyncio.run(service.run("bootstrap", apply=True, batch_size=2))
+    assert manifest1.stats.discovered == 2
+    processed_ids1 = {doc.document_id for doc in manifest1.documents}
+    assert processed_ids1 == {"doc-a", "doc-b"}
+
+    # 第二批: batch_size=2, resume_from="doc-b", 应该获取 doc-b 和 doc-c
+    manifest2, _ = asyncio.run(service.run("sync", apply=True, batch_size=2, resume_from="doc-b"))
+    assert manifest2.stats.discovered == 2
+    processed_ids2 = {doc.document_id for doc in manifest2.documents}
+    assert processed_ids2 == {"doc-b", "doc-c"}
+
+
+def test_cleanup_retention_cleans_rendered_html(tmp_path: Path) -> None:
+    """测试 retention 清理能正确清除超期的 html 缓存和自底向上空目录。"""
+    _ensure_static_registered()
+    config = DocumentSyncConfig.model_validate(
+        {
+            "workspace_root": tmp_path,
+            "runtime": {"root_directory": "./runtime", "retention_days": 7},
+            "http_defaults": {"respect_robots_txt": False},
+            "sources": [
+                {
+                    "id": "static-source",
+                    "target_directory": "./documents",
+                    "adapter": {
+                        "type": StaticAdapter.adapter_type,
+                        "options": {
+                            "title": "Static",
+                            "body": "body",
+                            "uri": "memory://doc-1",
+                            "status_code": 200,
+                            "relative_path": "doc.md",
+                        },
+                    },
+                }
+            ],
+        }
+    )
+
+    service = DocumentSyncService(config)
+    service.storage.ensure_directories()
+
+    html_root = tmp_path / "runtime" / "rendered_html"
+    nested_dir = html_root / "subdir1" / "subdir2"
+    nested_dir.mkdir(parents=True, exist_ok=True)
+
+    old_file = nested_dir / "old.html"
+    new_file = nested_dir / "new.html"
+
+    old_file.write_text("old", encoding="utf-8")
+    new_file.write_text("new", encoding="utf-8")
+
+    # 修改时间
+    import os
+    import time
+    now = time.time()
+    old_time = now - (10 * 24 * 3600)  # 10天前，超期
+    new_time = now - (2 * 24 * 3600)   # 2天前，未超期
+
+    os.utime(old_file, (old_time, old_time))
+    os.utime(new_file, (new_time, new_time))
+
+    # 首次清理：仅清理 old_file, new_file 留着, 目录不为空，不应该被删除
+    removed1 = service.storage.cleanup_retention()
+    assert old_file.resolve() in removed1
+    assert not old_file.exists()
+    assert new_file.exists()
+    assert nested_dir.exists()
+
+    # 再次将 new_file 设为超期
+    os.utime(new_file, (old_time, old_time))
+    removed2 = service.storage.cleanup_retention()
+    assert new_file.resolve() in removed2
+    assert not new_file.exists()
+    assert not nested_dir.exists()  # 应该自底向上被删除
+    assert not (html_root / "subdir1").exists()
