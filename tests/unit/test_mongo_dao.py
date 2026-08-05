@@ -29,6 +29,7 @@ from src.dao.mongo import (
     DAOAlreadyExistsError,
     DAOConcurrentUpdateError,
     DAONotFoundError,
+    DAOUnavailableError,
     DAOValidationError,
     HealthStatus,
     LifecycleState,
@@ -343,8 +344,9 @@ def _encode_cursor_no_ts_rejects():
 
 def _encode_cursor_no_oid_rejects():
     """B4: 文档缺 _id 时，编码器必须抛 DAOValidationError。"""
-    from src.dao.mongo.lig_update_record_dao import _encode_cursor
     from datetime import UTC, datetime
+
+    from src.dao.mongo.lig_update_record_dao import _encode_cursor
 
     with pytest.raises(DAOValidationError, match="cannot encode cursor"):
         _encode_cursor({"created_at": datetime.now(UTC)})
@@ -360,8 +362,9 @@ def _decode_cursor_missing_ts_rejects():
 
 def _decode_cursor_missing_oid_rejects():
     """B1: 游标缺 _id 必须抛 DAOValidationError。"""
-    from src.dao.mongo.lig_update_record_dao import _decode_cursor
     from datetime import UTC, datetime
+
+    from src.dao.mongo.lig_update_record_dao import _decode_cursor
 
     cur = f"{datetime.now(UTC).isoformat()}|"
     with pytest.raises(DAOValidationError, match="missing _id"):
@@ -615,3 +618,35 @@ async def test_settings_uri_not_logged(caplog):
     full_text = caplog.text
     assert "s3cr3t" not in full_text, f"password leaked in log: {full_text[:500]}"
     assert "user:" not in full_text, f"credentials leaked in log: {full_text[:500]}"
+
+
+@pytest.mark.asyncio
+async def test_connect_failure_does_not_leave_half_connected_state():
+    """单元测试：
+    把 settings 指向不存在的 Mongo URI（mongodb://127.0.0.1:1），
+    assert connect() 抛 DAOUnavailableError，且之后 mongo._client is None。
+    然后 mongo.connect() 第二次（同样失败），assert 仍抛错且 _client is None。
+    """
+    settings = MongoSettings(
+        uri="mongodb://127.0.0.1:1",
+        database="test_unreachable",
+        app_name="rag-test-unreachable",
+        server_selection_timeout_ms=100,  # 极短超时，加速失败
+        connect_timeout_ms=100,
+        use_transactions=False,
+    )
+    mongo = MongoDatabase(settings)
+
+    # 第一次 connect，应当抛 DAOUnavailableError，且 _client 与 _db 保持 None
+    with pytest.raises(DAOUnavailableError):
+        await mongo.connect()
+
+    assert mongo._client is None
+    assert mongo._db is None
+
+    # 第二次 connect，同样应当失败，且仍保持 None
+    with pytest.raises(DAOUnavailableError):
+        await mongo.connect()
+
+    assert mongo._client is None
+    assert mongo._db is None
