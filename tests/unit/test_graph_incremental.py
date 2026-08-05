@@ -245,12 +245,16 @@ class InMemoryRelationGraphStore:
             return 0
         count = 0
         for edge in self._edges.values():
+            if edge.is_broken:
+                continue
             if (
                 edge.wiki_id == wiki_id
                 and edge.namespace == namespace
                 and edge.version == version
-                and (edge.source_artifact_id == id_a and edge.target_artifact_id == id_b)
-                or (edge.source_artifact_id == id_b and edge.target_artifact_id == id_a)
+                and (
+                    (edge.source_artifact_id == id_a and edge.target_artifact_id == id_b)
+                    or (edge.source_artifact_id == id_b and edge.target_artifact_id == id_a)
+                )
             ):
                 count += 1
         return count
@@ -265,6 +269,8 @@ class InMemoryRelationGraphStore:
         relation_type,
     ) -> bool:
         for edge in self._edges.values():
+            if edge.is_broken:
+                continue
             if (
                 edge.wiki_id == wiki_id
                 and edge.namespace == namespace
@@ -285,7 +291,7 @@ class InMemoryRelationGraphStore:
         return [
             edge
             for edge in self._edges.values()
-            if edge.wiki_id == wiki_id and edge.namespace == namespace and edge.version == version
+            if edge.wiki_id == wiki_id and edge.namespace == namespace and edge.version == version and not edge.is_broken
         ]
 
     async def count_edges(
@@ -297,7 +303,7 @@ class InMemoryRelationGraphStore:
         return sum(
             1
             for edge in self._edges.values()
-            if edge.wiki_id == wiki_id and edge.namespace == namespace and edge.version == version
+            if edge.wiki_id == wiki_id and edge.namespace == namespace and edge.version == version and not edge.is_broken
         )
 
     async def iter_edges_for_scope(
@@ -317,6 +323,7 @@ class InMemoryRelationGraphStore:
                 if edge.wiki_id == wiki_id
                 and edge.namespace == namespace
                 and edge.version == version
+                and not edge.is_broken
             ),
             key=lambda e: e.edge_id,
         )
