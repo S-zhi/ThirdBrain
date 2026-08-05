@@ -312,6 +312,8 @@ class EvidenceRef(KnowledgeModel):
 
     document_id: str = Field(min_length=1, max_length=256)
     rag_collection_id: str = Field(min_length=1, max_length=512)
+    namespace: str = Field(default="", max_length=512)
+    version: str = Field(default="", max_length=128)
     part_id: str = Field(min_length=1, max_length=256)
     content_hash: str = Field(min_length=16, max_length=128)
     path: str | None = Field(default=None, max_length=4096)

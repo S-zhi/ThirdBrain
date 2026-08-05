@@ -402,3 +402,50 @@ async def test_reader_cancellation_is_not_swallowed_as_degradation() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await service.query_knowledge("cancel", _options())
+
+
+async def test_cross_namespace_provenance_is_filtered_out() -> None:
+    """如果 Evidence 中的 namespace 不匹配当前的 scope namespace，且不为空，则应该被过滤掉。"""
+    item = _item("concept:scoped", kind=ArtifactKind.CONCEPT)
+    # 增加一个匹配 namespace 的 evidence，和一个不匹配的非空 namespace 的 evidence
+    evidence_match = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="match",
+        part_id="part-match",
+        content_hash="sha256:match",
+        namespace="AscendC.API.910beta3",
+        version="910beta3",
+    )
+    evidence_mismatch = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="mismatch",
+        part_id="part-mismatch",
+        content_hash="sha256:mismatch",
+        namespace="torch.API.2.1",
+        version="910beta3",
+    )
+    # 旧的空 namespace evidence 应该被保留以便兼容
+    evidence_empty = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="empty",
+        part_id="part-empty",
+        content_hash="sha256:empty",
+        namespace="",
+        version="910beta3",
+    )
+    item = item.model_copy(update={"provenance": (evidence_match, evidence_mismatch, evidence_empty)})
+    service = KnowledgeQueryService(
+        StaticReader(_hit(item, RetrievalChannel.EXACT)),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge("scoped", _options())
+
+    # 应该保留匹配的和空（兼容旧数据）的 evidence，而过滤掉不匹配的非空 namespace evidence
+    assert len(result.knowledge_hits[0].provenance) == 2
+    provs = result.knowledge_hits[0].provenance
+    assert {p.document_id for p in provs} == {"match", "empty"}
+    assert "OUT_OF_SCOPE_PROVENANCE_DROPPED" in result.warnings

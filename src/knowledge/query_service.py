@@ -106,6 +106,7 @@ class KnowledgeQueryService:
                 evidence
                 for evidence in hit.item.provenance
                 if evidence.wiki_id == scope.wiki_id
+                and (not evidence.namespace or evidence.namespace == scope.namespace)
                 and (not evidence.version or evidence.version == scope.version)
                 and (
                     not requested_collections or evidence.rag_collection_id in requested_collections

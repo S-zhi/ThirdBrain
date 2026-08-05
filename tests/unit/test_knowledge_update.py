@@ -496,9 +496,12 @@ def test_mongo_repository_strips_only_mongo_internal_id_before_model_validation(
 
 
 from unittest.mock import MagicMock, patch
+
 from openai import OpenAIError
 from pymongo.errors import PyMongoError
+
 from src.knowledge.openai_extractor import KnowledgeExtractionError
+
 
 @pytest.mark.asyncio
 async def test_update_one_handles_knowledge_extraction_error() -> None:
@@ -606,3 +609,46 @@ async def test_update_one_does_not_swallow_unexpected_errors() -> None:
     document = _document()
     with pytest.raises(KeyError):
         await service.update_knowledge((document,))
+
+
+@pytest.mark.asyncio
+async def test_cross_namespace_evidence_validation() -> None:
+    """验证跨 namespace 证据在 validate_extraction 中被拦截，以及空 namespace 被自动补全。"""
+    repository = InMemoryKnowledgeRepository()
+    document = _document()
+
+    # 1. 跨 namespace 证据拦截
+    def draft_mismatch(doc: KnowledgeDocumentInput) -> ArtifactDraft:
+        d = _draft(doc)
+        # 修改证据中的 namespace 为不匹配的值
+        claim = d.claims[0]
+        claim.evidence[0].namespace = "torch.API.2.1"
+        return d
+
+    extractor_mismatch = FakeExtractor(draft_mismatch)
+    service_mismatch = KnowledgeUpdateService(repository, extractor_mismatch)
+    result_mismatch = await service_mismatch.update_knowledge((document,))
+
+    assert result_mismatch.status == UpdateStatus.FAILED
+    assert result_mismatch.documents_failed == 1
+    assert any(issue.code == "EVIDENCE_NAMESPACE_MISMATCH" for issue in result_mismatch.validation.issues)
+
+    # 2. 空 namespace 自动补全通过
+    def draft_empty(doc: KnowledgeDocumentInput) -> ArtifactDraft:
+        d = _draft(doc)
+        # 将证据中的 namespace 设为空，以便触发补全
+        claim = d.claims[0]
+        claim.evidence[0].namespace = ""
+        return d
+
+    extractor_empty = FakeExtractor(draft_empty)
+    service_empty = KnowledgeUpdateService(repository, extractor_empty)
+    result_empty = await service_empty.update_knowledge((document,))
+
+    assert result_empty.status == UpdateStatus.COMPLETED
+    assert result_empty.documents_created == 1
+    # 验证数据库中保存的值已被补全
+    artifacts = await repository.list_active_artifacts(document.wiki_id, document.namespace, document.version)
+    assert len(artifacts) == 1
+    stored_evidence = artifacts[0].draft.claims[0].evidence[0]
+    assert stored_evidence.namespace == document.namespace

@@ -386,6 +386,7 @@ def _source_to_item(hit: SourceRetrievalHit, wiki_id: str) -> KnowledgeItem:
         content_hash=hit.content_hash,
         path=hit.source_path,
         source_url=hit.source_url,
+        namespace=hit.namespace,
         version=hit.version,
     )
     return KnowledgeItem(
