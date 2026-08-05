@@ -238,6 +238,30 @@ async def test_stale_artifact_is_hidden_unless_explicitly_requested() -> None:
     assert [item.id for item in visible.knowledge_hits] == ["concept:stale"]
 
 
+def test_in_scope_status_matrix() -> None:
+    """测试 KnowledgeQueryService._in_scope 方法针对各种 ArtifactStatus 及其选项的过滤行为。"""
+    active_item = _item("concept:active", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.ACTIVE)
+    stale_item = _item("concept:stale", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.STALE)
+    pending_item = _item("concept:pending", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.PENDING_REVIEW)
+    archived_item = _item("concept:archived", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.ARCHIVED)
+
+    # 1. status=ACTIVE -> 无论 include_stale 为何值，都应该在 Scope 内
+    assert KnowledgeQueryService._in_scope(active_item, _options(include_stale=False)) is True
+    assert KnowledgeQueryService._in_scope(active_item, _options(include_stale=True)) is True
+
+    # 2. status=STALE, include_stale=True -> True
+    assert KnowledgeQueryService._in_scope(stale_item, _options(include_stale=True)) is True
+
+    # 3. status=STALE, include_stale=False -> False
+    assert KnowledgeQueryService._in_scope(stale_item, _options(include_stale=False)) is False
+
+    # 4. 其他状态 (如 PENDING_REVIEW, ARCHIVED 等非 ACTIVE / STALE 状态) -> 无论 include_stale 都是 False
+    assert KnowledgeQueryService._in_scope(pending_item, _options(include_stale=False)) is False
+    assert KnowledgeQueryService._in_scope(pending_item, _options(include_stale=True)) is False
+    assert KnowledgeQueryService._in_scope(archived_item, _options(include_stale=False)) is False
+    assert KnowledgeQueryService._in_scope(archived_item, _options(include_stale=True)) is False
+
+
 async def test_micro_budget_returns_capsule_and_stable_ranking() -> None:
     """小预算最多保留三个候选，重复查询的排序和分数必须稳定。"""
     hits = tuple(
