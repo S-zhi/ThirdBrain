@@ -247,9 +247,7 @@ async def test_record_update_with_whitelist(mongo_stack):
         status=UpdateStatus.RUNNING,
         stage=UpdateStage.FETCH,
     )
-    updated = await dao.update(
-        record.record_id, patch, expected_status=UpdateStatus.PENDING
-    )
+    updated = await dao.update(record.record_id, patch, expected_status=UpdateStatus.PENDING)
     assert updated.status == UpdateStatus.RUNNING
     assert updated.stage == UpdateStage.FETCH
 
@@ -274,9 +272,7 @@ async def test_record_update_expected_status_mismatch(mongo_stack):
     _mongo, dao, _ = mongo_stack
     record = await dao.create(_make_record())
     # 先改成 RUNNING，再用 expected=PENDING 更新：状态机不匹配，是并发冲突
-    await dao.update(
-        record.record_id, LIGUpdateRecordPatch(status=UpdateStatus.RUNNING)
-    )
+    await dao.update(record.record_id, LIGUpdateRecordPatch(status=UpdateStatus.RUNNING))
     with pytest.raises(DAOConcurrentUpdateError):
         await dao.update(
             record.record_id,
@@ -343,8 +339,9 @@ def _encode_cursor_no_ts_rejects():
 
 def _encode_cursor_no_oid_rejects():
     """B4: 文档缺 _id 时，编码器必须抛 DAOValidationError。"""
-    from src.dao.mongo.lig_update_record_dao import _encode_cursor
     from datetime import UTC, datetime
+
+    from src.dao.mongo.lig_update_record_dao import _encode_cursor
 
     with pytest.raises(DAOValidationError, match="cannot encode cursor"):
         _encode_cursor({"created_at": datetime.now(UTC)})
@@ -360,8 +357,9 @@ def _decode_cursor_missing_ts_rejects():
 
 def _decode_cursor_missing_oid_rejects():
     """B1: 游标缺 _id 必须抛 DAOValidationError。"""
-    from src.dao.mongo.lig_update_record_dao import _decode_cursor
     from datetime import UTC, datetime
+
+    from src.dao.mongo.lig_update_record_dao import _decode_cursor
 
     cur = f"{datetime.now(UTC).isoformat()}|"
     with pytest.raises(DAOValidationError, match="missing _id"):
@@ -526,9 +524,7 @@ async def test_state_archive_marks_deleted_and_bumps_revision(mongo_stack):
     _mongo, _record_dao, dao = mongo_stack
     state = await dao.create(_make_state())
     assert state.lifecycle_state == LifecycleState.NEW
-    archived = await dao.archive(
-        state.namespace, state.text_id, expected_revision=state.revision
-    )
+    archived = await dao.archive(state.namespace, state.text_id, expected_revision=state.revision)
     assert archived.lifecycle_state == LifecycleState.DELETED
     assert archived.deleted_at is not None
     assert archived.revision == state.revision + 1
@@ -543,17 +539,13 @@ async def test_state_archive_twice_raises_validation_error(mongo_stack):
     """
     _mongo, _record_dao, dao = mongo_stack
     state = await dao.create(_make_state())
-    first = await dao.archive(
-        state.namespace, state.text_id, expected_revision=state.revision
-    )
+    first = await dao.archive(state.namespace, state.text_id, expected_revision=state.revision)
     original_deleted_at = first.deleted_at
     original_revision = first.revision
 
     # 第二次 archive 必须在 get() 阶段就拒，不动 DB
     with pytest.raises(DAOValidationError, match="already DELETED"):
-        await dao.archive(
-            state.namespace, state.text_id, expected_revision=first.revision
-        )
+        await dao.archive(state.namespace, state.text_id, expected_revision=first.revision)
 
     # 复核：deleted_at 和 revision 都没变
     fetched = await dao.get(state.namespace, state.text_id)
@@ -608,10 +600,133 @@ async def test_settings_uri_not_logged(caplog):
     try:
         await mongo.connect()
     except Exception as exc:  # noqa: BLE001 — 不可用时仅关心日志
-        logging.getLogger(__name__).debug(
-            "connect not available: %s", type(exc).__name__
-        )
+        logging.getLogger(__name__).debug("connect not available: %s", type(exc).__name__)
     await mongo.close()
     full_text = caplog.text
     assert "s3cr3t" not in full_text, f"password leaked in log: {full_text[:500]}"
     assert "user:" not in full_text, f"credentials leaked in log: {full_text[:500]}"
+
+
+# ---------------------------------------------------------------------------
+# 并发 race 幂等/schema 漂移 单元测试（无需启动本地 Mongo）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_create_indexes_race_resolved():
+    """并发 race: 别的进程建好了(同 name + 同 key + 同 options)，应当 resolved 并当做成功。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pymongo.errors import OperationFailure
+
+    # Mock MongoDatabase 和 Collection
+    mock_mongo = MagicMock(spec=MongoDatabase)
+    mock_mongo.settings = MagicMock()
+    mock_mongo.settings.init_mode = "auto"
+    mock_mongo.record_collection_name = "lig_update_records"
+    mock_mongo.state_collection_name = "lig_text_states"
+    mock_mongo.query_record_collection_name = "query_records"
+
+    mock_db = MagicMock()
+    mock_mongo.db = mock_db
+
+    bootstrap = MongoBootstrap(mock_mongo)
+
+    mock_coll = MagicMock()
+    mock_db.__getitem__.return_value = mock_coll
+
+    # 首次 list_indexes 模拟未建完（返回空）
+    async def mock_list_indexes_empty():
+        if False:
+            yield
+
+    # 第二次 list_indexes (recheck) 返回别的进程已经建好的匹配索引
+    async def mock_list_indexes_with_match():
+        yield {
+            "name": "uq_lig_record_id",
+            "key": {"record_id": 1},  # pymongo 返回的 key 格式可能为 dict/SON
+            "unique": True,
+        }
+
+    list_indexes_calls = []
+
+    def list_indexes_side_effect(*args, **kwargs):
+        if not list_indexes_calls:
+            list_indexes_calls.append(1)
+            return mock_list_indexes_empty()
+        else:
+            return mock_list_indexes_with_match()
+
+    mock_coll.list_indexes = AsyncMock(side_effect=list_indexes_side_effect)
+
+    # create_index 抛出 OperationFailure (already exists)
+    mock_coll.create_index = AsyncMock(
+        side_effect=OperationFailure("Index already exists with same options")
+    )
+
+    test_indexes = [
+        {
+            "name": "uq_lig_record_id",
+            "key": [("record_id", 1)],
+            "options": {"unique": True, "name": "uq_lig_record_id"},
+        }
+    ]
+
+    # 应该正常跑完且不抛错
+    await bootstrap._create_indexes("lig_update_records", test_indexes)
+
+    assert mock_coll.create_index.called
+    assert mock_coll.list_indexes.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_create_indexes_schema_drift():
+    """真实 schema 漂移: 同 name 但 key/options 不一致，必须抛出 RuntimeError。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pymongo.errors import OperationFailure
+
+    # Mock MongoDatabase 和 Collection
+    mock_mongo = MagicMock(spec=MongoDatabase)
+    bootstrap = MongoBootstrap(mock_mongo)
+
+    mock_coll = MagicMock()
+    mock_mongo.db = MagicMock()
+    mock_mongo.db.__getitem__.return_value = mock_coll
+
+    async def mock_list_indexes_empty():
+        if False:
+            yield
+
+    # 第二次 list_indexes 返回不匹配的 options (期望 unique=True 但实际 unique=False)
+    async def mock_list_indexes_mismatch():
+        yield {
+            "name": "uq_lig_record_id",
+            "key": {"record_id": 1},
+            "unique": False,  # 不匹配
+        }
+
+    list_indexes_calls = []
+
+    def list_indexes_side_effect(*args, **kwargs):
+        if not list_indexes_calls:
+            list_indexes_calls.append(1)
+            return mock_list_indexes_empty()
+        else:
+            return mock_list_indexes_mismatch()
+
+    mock_coll.list_indexes = AsyncMock(side_effect=list_indexes_side_effect)
+    mock_coll.create_index = AsyncMock(side_effect=OperationFailure("IndexKeySpecsConflict"))
+
+    test_indexes = [
+        {
+            "name": "uq_lig_record_id",
+            "key": [("record_id", 1)],
+            "options": {"unique": True, "name": "uq_lig_record_id"},
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="schema drift detected"):
+        await bootstrap._create_indexes("lig_update_records", test_indexes)
+
+    assert mock_coll.list_indexes.call_count == 2
