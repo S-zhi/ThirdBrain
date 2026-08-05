@@ -279,7 +279,7 @@ class IngestRunRecord(BaseModel):
     sub_directory: str
     collection: str
     dry_run: bool
-    status: Literal["running", "dry_run", "succeeded", "partial", "failed"] = "running"
+    status: Literal["running", "dry_run", "succeeded", "partial", "failed", "skipped"] = "running"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
     discovered_count: int = 0
@@ -470,8 +470,13 @@ def _finalize_status(record: IngestRunRecord) -> None:
     """根据解析和索引结果计算运行终态。"""
     record.finished_at = datetime.now(UTC)
     record.failed_count = len(record.errors)
-    if record.parsed_count == 0 or (not record.dry_run and record.indexed_count == 0):
+    if record.parsed_count == 0:
         record.status = "failed"
+    elif not record.dry_run and record.indexed_count == 0:
+        if record.skipped_count == record.parsed_count:
+            record.status = "skipped"
+        else:
+            record.status = "failed"
     elif record.errors:
         record.status = "partial"
     elif record.dry_run:
@@ -605,7 +610,7 @@ def main() -> int:
         preview_limit=args.preview_limit,
     )
     print(result.model_dump_json(indent=2))
-    return 0 if result.record.status in {"dry_run", "succeeded"} else 1
+    return 0 if result.record.status in {"dry_run", "succeeded", "skipped"} else 1
 
 
 if __name__ == "__main__":
