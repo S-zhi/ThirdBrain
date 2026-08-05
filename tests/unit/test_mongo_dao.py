@@ -29,6 +29,7 @@ from src.dao.mongo import (
     DAOAlreadyExistsError,
     DAOConcurrentUpdateError,
     DAONotFoundError,
+    DAOUnavailableError,
     DAOValidationError,
     HealthStatus,
     LifecycleState,
@@ -355,6 +356,121 @@ def _decode_cursor_missing_ts_rejects():
         _decode_cursor("|abc123")
 
 
+@pytest.mark.asyncio
+async def test_naive_datetime_handling_and_cursor_warnings(caplog):
+    """测试 naive datetime 编码/解码。
+    1. 编码 naive datetime 时包含 +00:00，变成 tz-aware UTC。
+    2. 解码无 offset 的 naive timestamp 时，抛出警告日志 `lig.cursor.naive_datetime ts=%s` 并且补 UTC。
+    """
+    import logging
+
+    from bson import ObjectId
+
+    from src.dao.mongo.lig_text_state_dao import (
+        _decode_cursor as decode_state,
+    )
+    from src.dao.mongo.lig_text_state_dao import (
+        _encode_cursor as encode_state,
+    )
+    from src.dao.mongo.lig_update_record_dao import (
+        _decode_cursor as decode_record,
+    )
+    from src.dao.mongo.lig_update_record_dao import (
+        _encode_cursor as encode_record,
+    )
+
+    # LIGUpdateRecord
+    naive_dt = datetime.fromisoformat("2024-01-01T00:00:00")
+    oid = ObjectId()
+    doc = {"created_at": naive_dt, "_id": oid}
+    encoded = encode_record(doc)
+    assert "+00:00" in encoded
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        decoded_dt, decoded_oid = decode_record(f"2024-01-01T00:00:00|{oid}")
+    assert decoded_dt.tzinfo == UTC
+    assert decoded_dt.hour == 0
+    assert decoded_oid == str(oid)
+    assert any("lig.cursor.naive_datetime ts=" in record.message for record in caplog.records)
+
+    # LIGTextState
+    state_doc = {"updated_at": naive_dt, "_id": oid}
+    encoded_state = encode_state(state_doc)
+    assert "+00:00" in encoded_state
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        decoded_state_dt, decoded_state_oid = decode_state(f"2024-01-01T00:00:00|{oid}")
+    assert decoded_state_dt.tzinfo == UTC
+    assert decoded_state_dt.hour == 0
+    assert decoded_state_oid == str(oid)
+    assert any("lig.cursor.naive_datetime ts=" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_pagination_consistency_with_naive_cursor(mongo_stack):
+    """测试使用 naive 和 tz-aware 游标进行分页时一致，且不会有漏/重。"""
+    _mongo, record_dao, _ = mongo_stack
+
+    # 制造 3 条记录，由于 pytest stack 中 _make_record 会调用 datetime.now(UTC) 写入
+    # 我们用 naive datetimes 并模拟不同时区偏差，来触发 list_by_text 验证
+    # 实际上，我们可以往 DB 里插入带 naive / UTC time 的记录，然后分页看看是否一致。
+    dt1 = datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC)
+    dt2 = datetime(2024, 1, 1, 10, 0, 0, tzinfo=UTC)
+    dt3 = datetime(2024, 1, 1, 8, 0, 0, tzinfo=UTC)
+
+    # 创建 record 1
+    r1 = _make_record()
+    r1.created_at = dt1
+    await record_dao.create(r1)
+
+    # 创建 record 2
+    r2 = _make_record()
+    r2.created_at = dt2
+    await record_dao.create(r2)
+
+    # 创建 record 3
+    r3 = _make_record()
+    r3.created_at = dt3
+    await record_dao.create(r3)
+
+    # 首先，不使用 cursor，单页 limit 1 应该返回最近的 r1
+    page1 = await record_dao.list_by_text(r1.namespace, r1.text_id, limit=1)
+    assert len(page1.items) == 1
+    assert page1.items[0].record_id == r1.record_id
+    assert page1.next_cursor is not None
+
+    # 解码 page1 的 cursor，会得到带 +00:00 的正常 ts
+    # 现在我们手动伪造一个 naive timestamp 游标："2024-01-01T12:00:00|<r1._id>"
+    # 在 MongoDB 里，虽然是以 UTC 存储的，但由于我们现在强制解码出 UTC 属性的 timestamp，
+    # 它的查询应该能跟 tz-aware 游标一模一样，完美查到 r2。
+    # 我们先直接从 page1.items[0] 获取真正的 _id (实际上 _make_record 不含 _id，DAO create 后会拿回带 _id 的新 model)
+    # 我们需要先获取真实的记录以拿取 _id。
+    coll = record_dao._coll()
+    doc_r1 = await coll.find_one({"record_id": r1.record_id})
+    oid1 = doc_r1["_id"]
+
+    naive_cursor = f"2024-01-01T12:00:00|{oid1}"
+
+    # 用 naive cursor 查询
+    page2_naive = await record_dao.list_by_text(
+        r1.namespace, r1.text_id, cursor=naive_cursor, limit=1
+    )
+    assert len(page2_naive.items) == 1
+    assert page2_naive.items[0].record_id == r2.record_id
+
+    # 用 tz-aware cursor 查询 (正常 page1.next_cursor 应该是 2024-01-01T12:00:00+00:00|<oid1>)
+    page2_tz = await record_dao.list_by_text(
+        r1.namespace, r1.text_id, cursor=page1.next_cursor, limit=1
+    )
+    assert len(page2_tz.items) == 1
+    assert page2_tz.items[0].record_id == r2.record_id
+
+    # 两者得到完全一致的结果
+    assert page2_naive.items[0].record_id == page2_tz.items[0].record_id
+
+
 def _decode_cursor_missing_oid_rejects():
     """B1: 游标缺 _id 必须抛 DAOValidationError。"""
     from datetime import UTC, datetime
@@ -607,9 +723,6 @@ async def test_settings_uri_not_logged(caplog):
     assert "user:" not in full_text, f"credentials leaked in log: {full_text[:500]}"
 
 
-# ---------------------------------------------------------------------------
-# 并发 race 幂等/schema 漂移 单元测试（无需启动本地 Mongo）
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
