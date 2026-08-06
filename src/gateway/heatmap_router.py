@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import os
 from typing import Annotated
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -20,9 +22,14 @@ router = APIRouter(
     tags=["Heatmap"],
 )
 
-#: target_url 占位符。后续替换为该 API 在 Link Graph Explorer 中的
-#: 节点详情页 URL。
-PLACEHOLDER_TARGET_URL = "https://www.google.com"
+# TODO: 等 Link Graph Explorer 上线时，将此处的临时 API 详情页 URL 替换为 Link Graph Explorer 真实节点详情页的生成函数。
+def _build_target_url(api_id: str) -> str:
+    """用前端服务的 base URL 拼出 API 详情页 URL。
+
+    默认使用环境变量 ``FRONTEND_BASE_URL``，缺省为 ``http://localhost:3000``。
+    """
+    base = os.getenv("FRONTEND_BASE_URL", "http://localhost:3000").rstrip("/")
+    return f"{base}/api-explorer/{quote(api_id, safe='')}"
 
 #: top_n 上下界。前端默认 100；上限 1000 防止误请求拉爆 Redis。
 _DEFAULT_TOP_N = 100
@@ -72,7 +79,7 @@ def _to_entry(index: int, entry: HeatmapEntry) -> HeatmapDataEntry:
         hits=entry.hits,
         x=index,
         y=entry.hits,
-        target_url=PLACEHOLDER_TARGET_URL,
+        target_url=_build_target_url(entry.api_id),
     )
 
 
