@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import Header, HTTPException, status
 
 ENV_KNOWLEDGE_API_KEY = "KNOWLEDGE_API_KEY"
+ENV_AGENT_PLATFORM_API_KEY = "AGENT_PLATFORM_API_KEY"
 
 
 def require_service_auth(
@@ -31,4 +32,26 @@ def require_service_auth(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid service credentials",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def require_agent_platform_auth(
+    x_agent_platform_key: Annotated[
+        str | None,
+        Header(alias="X-Agent-Platform-Key"),
+    ] = None,
+) -> None:
+    """仅允许 Agent Platform 调用 Core 的私有数据 Gateway。"""
+
+    expected = os.environ.get(ENV_AGENT_PLATFORM_API_KEY, "").strip()
+    if not expected:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent Platform authentication is not configured",
+        )
+    candidate = (x_agent_platform_key or "").strip()
+    if not candidate or not secrets.compare_digest(candidate, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Agent Platform credentials",
         )

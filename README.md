@@ -50,6 +50,7 @@ flowchart LR
 | Knowledge Wiki 的产品语义和代码落点 | [Knowledge README](src/knowledge/README.md) / [English](src/knowledge/README.en.md) |
 | Knowledge 只读查询契约 | [Knowledge Query](docs/knowledge-query.md) |
 | Knowledge 更新链路 | [Knowledge Update Plane](docs/knowledge-update-plane.md) |
+| Agent Platform 设计与本地运行 | [Agent Platform](docs/agent-platform.md) |
 | MongoDB 连接、初始化和故障排查 | [MongoDB 配置](docs/mongodb.md) |
 | 官网 Markdown 文档同步 | [文档同步初始化与运维](docs/document-sync-setup.md) |
 | 数据采集层爬虫设计 | [数据采集层说明](docs/data-collection-layer-crawler.md) |
