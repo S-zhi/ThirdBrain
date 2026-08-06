@@ -76,18 +76,8 @@ def _encode_cursor(doc: dict[str, Any]) -> str:
     让游标退化成空，导致分页错位；缺 _id 会让并列无法破序。
 
     .. warning::
-        **Naive datetime 风险**：本函数**不**校验 ``created_at`` 是否带
-        ``tzinfo``。如果 caller 传进来的 doc 里的 ``created_at`` 是 naive
-        datetime（无 tzinfo），``isoformat()`` 输出形如
-        ``"2024-01-01T00:00:00"``（无 offset），经 :func:`_decode_cursor`
-        解出来还是 naive；然后 :meth:`list_by_text` 拿这个 naive ts 去构造
-        ``{"created_at": {"$lt": ts}}`` 查询，MongoDB 服务端会按 BSON UTC
-        解释时区，**可能与存储的 tz-aware datetime 比较结果错位**（分页
-        漏数据 / 重复数据）。
-
-        建议：永远用 :class:`datetime` 带 ``tzinfo=UTC`` 的值。DAO 在
-        :meth:`create` 写入的 ``created_at`` / ``updated_at`` 都带 ``UTC``，
-        是安全的；手工 ``insert_one`` 写入的裸 datetime 不保证。
+        **Naive datetime 风险**：已修复。如果传入的 ``created_at`` 是 naive datetime，
+        本函数会强制补 ``tzinfo=UTC`` 以确保导出的游标包含 ``+00:00``。
 
     Raises:
         DAOValidationError: 文档没有 ``created_at``（或不是 datetime）或
@@ -96,9 +86,10 @@ def _encode_cursor(doc: dict[str, Any]) -> str:
     ts = doc.get("created_at")
     if not isinstance(ts, datetime):
         raise DAOValidationError(
-            f"cannot encode cursor: doc missing/invalid created_at "
-            f"(type={type(ts).__name__})"
+            f"cannot encode cursor: doc missing/invalid created_at (type={type(ts).__name__})"
         )
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
     oid = doc.get("_id")
     if oid is None:
         raise DAOValidationError("cannot encode cursor: doc missing _id")
@@ -112,11 +103,8 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
     都抛 :class:`DAOValidationError`，**不**静默吞掉。
 
     .. warning::
-        **Naive datetime 风险**：``datetime.fromisoformat`` 还原出的是**原生
-        tz 状态**——客户端发的游标如果当时编码的就是 naive datetime，这里
-        解出来还是 naive，传到 MongoDB 查询时仍可能跟存储的 tz-aware 值
-        比较错位（见 :func:`_encode_cursor` 的 warning）。本函数**不**
-        强制补 ``tzinfo=UTC``，因为那会"假装时区对了"反而更难排查。
+        **Naive datetime 风险**：已修复。如果还原出的 ``datetime`` 是 naive datetime（无 tzinfo），
+        本函数会打印警告日志 ``lig.cursor.naive_datetime ts=%s`` 并强制补 ``tzinfo=UTC``。
 
     Returns:
         (timestamp, oid_string) 二元组。
@@ -135,13 +123,14 @@ def _decode_cursor(cursor: str) -> tuple[datetime, str]:
             f"client and server must agree on cursor format"
         )
     if not oid:
-        raise DAOValidationError(
-            f"invalid cursor: missing _id (cursor={cursor!r})"
-        )
+        raise DAOValidationError(f"invalid cursor: missing _id (cursor={cursor!r})")
     try:
         ts = datetime.fromisoformat(ts_str)
     except ValueError as exc:
         raise DAOValidationError(f"invalid cursor timestamp: {ts_str!r}") from exc
+    if ts.tzinfo is None:
+        logger.warning("lig.cursor.naive_datetime ts=%s", ts_str)
+        ts = ts.replace(tzinfo=UTC)
     return ts, oid
 
 
@@ -304,9 +293,7 @@ class LIGUpdateRecordDAO:
             try:
                 oid_obj = ObjectId(oid)
             except Exception as exc:
-                raise DAOValidationError(
-                    f"invalid cursor object id: {oid!r}"
-                ) from exc
+                raise DAOValidationError(f"invalid cursor object id: {oid!r}") from exc
             # (created_at, _id) 双键游标：严格按时间倒序，破并列用 _id 兜底。
             query["$or"] = [
                 {"created_at": {"$lt": ts}},

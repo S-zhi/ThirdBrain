@@ -238,6 +238,30 @@ async def test_stale_artifact_is_hidden_unless_explicitly_requested() -> None:
     assert [item.id for item in visible.knowledge_hits] == ["concept:stale"]
 
 
+def test_in_scope_status_matrix() -> None:
+    """测试 KnowledgeQueryService._in_scope 方法针对各种 ArtifactStatus 及其选项的过滤行为。"""
+    active_item = _item("concept:active", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.ACTIVE)
+    stale_item = _item("concept:stale", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.STALE)
+    pending_item = _item("concept:pending", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.PENDING_REVIEW)
+    archived_item = _item("concept:archived", kind=ArtifactKind.CONCEPT, status=ArtifactStatus.ARCHIVED)
+
+    # 1. status=ACTIVE -> 无论 include_stale 为何值，都应该在 Scope 内
+    assert KnowledgeQueryService._in_scope(active_item, _options(include_stale=False)) is True
+    assert KnowledgeQueryService._in_scope(active_item, _options(include_stale=True)) is True
+
+    # 2. status=STALE, include_stale=True -> True
+    assert KnowledgeQueryService._in_scope(stale_item, _options(include_stale=True)) is True
+
+    # 3. status=STALE, include_stale=False -> False
+    assert KnowledgeQueryService._in_scope(stale_item, _options(include_stale=False)) is False
+
+    # 4. 其他状态 (如 PENDING_REVIEW, ARCHIVED 等非 ACTIVE / STALE 状态) -> 无论 include_stale 都是 False
+    assert KnowledgeQueryService._in_scope(pending_item, _options(include_stale=False)) is False
+    assert KnowledgeQueryService._in_scope(pending_item, _options(include_stale=True)) is False
+    assert KnowledgeQueryService._in_scope(archived_item, _options(include_stale=False)) is False
+    assert KnowledgeQueryService._in_scope(archived_item, _options(include_stale=True)) is False
+
+
 async def test_micro_budget_returns_capsule_and_stable_ranking() -> None:
     """小预算最多保留三个候选，重复查询的排序和分数必须稳定。"""
     hits = tuple(
@@ -402,3 +426,50 @@ async def test_reader_cancellation_is_not_swallowed_as_degradation() -> None:
 
     with pytest.raises(asyncio.CancelledError):
         await service.query_knowledge("cancel", _options())
+
+
+async def test_cross_namespace_provenance_is_filtered_out() -> None:
+    """如果 Evidence 中的 namespace 不匹配当前的 scope namespace，且不为空，则应该被过滤掉。"""
+    item = _item("concept:scoped", kind=ArtifactKind.CONCEPT)
+    # 增加一个匹配 namespace 的 evidence，和一个不匹配的非空 namespace 的 evidence
+    evidence_match = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="match",
+        part_id="part-match",
+        content_hash="sha256:match",
+        namespace="AscendC.API.910beta3",
+        version="910beta3",
+    )
+    evidence_mismatch = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="mismatch",
+        part_id="part-mismatch",
+        content_hash="sha256:mismatch",
+        namespace="torch.API.2.1",
+        version="910beta3",
+    )
+    # 旧的空 namespace evidence 应该被保留以便兼容
+    evidence_empty = QueryEvidenceRef(
+        wiki_id="wiki:test",
+        rag_collection_id="rag:test",
+        document_id="empty",
+        part_id="part-empty",
+        content_hash="sha256:empty",
+        namespace="",
+        version="910beta3",
+    )
+    item = item.model_copy(update={"provenance": (evidence_match, evidence_mismatch, evidence_empty)})
+    service = KnowledgeQueryService(
+        StaticReader(_hit(item, RetrievalChannel.EXACT)),
+        EmptyRelationReader(),
+    )
+
+    result = await service.query_knowledge("scoped", _options())
+
+    # 应该保留匹配的和空（兼容旧数据）的 evidence，而过滤掉不匹配的非空 namespace evidence
+    assert len(result.knowledge_hits[0].provenance) == 2
+    provs = result.knowledge_hits[0].provenance
+    assert {p.document_id for p in provs} == {"match", "empty"}
+    assert "OUT_OF_SCOPE_PROVENANCE_DROPPED" in result.warnings

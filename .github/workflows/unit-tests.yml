@@ -1,0 +1,104 @@
+name: Python unit tests
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  # 如果以后启用 Merge Queue，需要保留此事件。
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: unit-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run unit tests
+        run: uv run pytest tests/unit --junitxml=test-results.xml
+
+      - name: Publish unit test results
+        id: test-results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: test-results.xml
+          check_name: Unit Test Results
+          comment_mode: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && 'failures' || 'off' }}
+          job_summary: true
+          check_run: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          compare_to_earlier_commit: true
+          check_run_annotations: all tests, skipped tests
+          check_run_annotations_branch: "*"
+          action_fail_on_inconclusive: true
+
+      - name: Add pass and failure rates
+        if: ${{ !cancelled() && steps.test-results.outputs.json != '' }}
+        env:
+          TEST_RESULTS_JSON: ${{ steps.test-results.outputs.json }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          result = json.loads(os.environ["TEST_RESULTS_JSON"])
+          stats = result["stats"]
+          passed = int(stats["tests_succ"])
+          failed = int(stats["tests_fail"]) + int(stats["tests_error"])
+          skipped = int(stats["tests_skip"])
+          executed = passed + failed
+          pass_rate = passed / executed * 100 if executed else 0.0
+          failure_rate = failed / executed * 100 if executed else 0.0
+
+          summary = f"""## Test rates
+
+          | Metric | Result |
+          | --- | ---: |
+          | Passed | {passed} |
+          | Failed / errors | {failed} |
+          | Skipped | {skipped} |
+          | Pass rate | {pass_rate:.2f}% |
+          | Failure rate | {failure_rate:.2f}% |
+          """
+
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open(
+              "a", encoding="utf-8"
+          ) as f:
+              f.write(summary)
+          PY
+
+      - name: Upload test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-test-report
+          path: test-results.xml
+          if-no-files-found: warn

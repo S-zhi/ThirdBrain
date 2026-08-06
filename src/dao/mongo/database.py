@@ -117,7 +117,7 @@ class MongoDatabase:
             return
 
         uri = self._settings.uri.get_secret_value()
-        self._client = AsyncMongoClient(
+        new_client = AsyncMongoClient(
             uri,
             appname=self._settings.app_name,
             serverSelectionTimeoutMS=self._settings.server_selection_timeout_ms,
@@ -128,9 +128,33 @@ class MongoDatabase:
             retryWrites=self._settings.retry_writes,
             tz_aware=True,
         )
+        try:
+            await new_client.admin.command("ping")
+        except ServerSelectionTimeoutError as exc:
+            try:
+                await new_client.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            raise DAOUnavailableError(
+                "MongoDB server selection timed out; check URI and service availability"
+            ) from exc
+        except PyMongoError as exc:
+            try:
+                await new_client.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            raise DAOUnavailableError(
+                f"MongoDB ping failed: {type(exc).__name__}"
+            ) from exc
+        except Exception:
+            try:
+                await new_client.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+            raise
+
+        self._client = new_client
         self._db = self._client[self._settings.database]
-        # 验证连接；若不可用直接抛错，避免后续请求才报。
-        await self.ping()
         logger.info(
             "mongo.connected database=%s record=%s state=%s app=%s",
             self._settings.database,

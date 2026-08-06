@@ -55,6 +55,32 @@ def validate_extraction(
             )
         for claim in artifact.claims:
             for evidence in claim.evidence:
+                if not evidence.namespace:
+                    evidence.namespace = document.namespace
+                if not evidence.version:
+                    evidence.version = document.version
+
+                if evidence.namespace != document.namespace:
+                    issues.append(
+                        _issue(
+                            "EVIDENCE_NAMESPACE_MISMATCH",
+                            f"Claim evidence 引用了 namespace={evidence.namespace!r} 的 document，"
+                            f"与当前 Source namespace={document.namespace!r} 不一致",
+                            document,
+                            artifact,
+                        )
+                    )
+                if evidence.version != document.version:
+                    issues.append(
+                        _issue(
+                            "EVIDENCE_VERSION_MISMATCH",
+                            f"Claim evidence 引用了 version={evidence.version!r} 的 document，"
+                            f"与当前 Source version={document.version!r} 不一致",
+                            document,
+                            artifact,
+                        )
+                    )
+
                 if (
                     evidence.document_id != document.document_id
                     or evidence.rag_collection_id != document.rag_collection_id
@@ -135,6 +161,32 @@ def validate_extraction(
                     )
                 )
             for evidence in relation.evidence:
+                if not evidence.namespace:
+                    evidence.namespace = document.namespace
+                if not evidence.version:
+                    evidence.version = document.version
+
+                if evidence.namespace != document.namespace:
+                    issues.append(
+                        _issue(
+                            "RELATION_EVIDENCE_NAMESPACE_MISMATCH",
+                            f"关系 Evidence 引用了 namespace={evidence.namespace!r} 的 document，"
+                            f"与当前 Source namespace={document.namespace!r} 不一致",
+                            document,
+                            artifact,
+                        )
+                    )
+                if evidence.version != document.version:
+                    issues.append(
+                        _issue(
+                            "RELATION_EVIDENCE_VERSION_MISMATCH",
+                            f"关系 Evidence 引用了 version={evidence.version!r} 的 document，"
+                            f"与当前 Source version={document.version!r} 不一致",
+                            document,
+                            artifact,
+                        )
+                    )
+
                 part = parts.get(evidence.part_id)
                 if (
                     evidence.document_id != document.document_id
