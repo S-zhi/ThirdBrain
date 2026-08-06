@@ -193,3 +193,51 @@ async def test_batch_keeps_order_ids_and_failure_isolation() -> None:
     assert results[0].result is not None
     assert results[1].error is not None
     assert [record.batch_id for record in writer.records] == ["batch-1", "batch-1"]
+
+
+class FakeDirtyRetriever:
+    """返回包含脏数据和干净数据的检索结果。"""
+
+    def query_name(self, command: AgentQueryCommand) -> list[SearchResult]:
+        clean_fields = _fields()
+
+        # 缺失 namespace 的脏数据
+        dirty_fields_1 = _fields()
+        dirty_fields_1["namespace"] = ""
+
+        # 缺失 name 的脏数据
+        dirty_fields_2 = _fields()
+        dirty_fields_2["name"] = None
+
+        # ingested_at 类型非法的脏数据
+        dirty_fields_3 = _fields()
+        dirty_fields_3["ingested_at"] = "invalid_date"
+
+        return [
+            SearchResult("clean-id", 1.0, clean_fields),
+            SearchResult("dirty-id-1", 0.9, dirty_fields_1),
+            SearchResult("dirty-id-2", 0.8, dirty_fields_2),
+            SearchResult("dirty-id-3", 0.7, dirty_fields_3),
+        ]
+
+    def query_semantic(self, command: AgentQueryCommand) -> list[SearchResult]:
+        return self.query_name(command)
+
+
+@pytest.mark.asyncio
+async def test_dirty_data_is_skipped_with_warning() -> None:
+    """脏数据（缺失核心字段或类型非法）应被跳过，并记 warning 且不导致整批失败。"""
+    retriever = FakeDirtyRetriever()
+    writer = FakeRecordWriter()
+    service = AgentQueryService(retriever, writer, collection_name="api_docs")
+
+    result = await service.query_once(_command(), request_id="request-dirty")
+
+    assert len(result.documents) == 1
+    assert result.documents[0].api_id == "com.example.api.v2.foo"
+    assert "ZRES_HIT_DROPPED_DUE_TO_MISSING_FIELDS" in result.warnings
+
+    # 验证 MongoDB 里的 record 也保存了 warning
+    assert len(writer.records) == 1
+    assert writer.records[0].status == QueryExecutionStatus.SUCCEEDED
+    assert "ZRES_HIT_DROPPED_DUE_TO_MISSING_FIELDS" in writer.records[0].warnings
