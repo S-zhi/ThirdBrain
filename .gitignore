@@ -68,3 +68,4 @@ data/
 /.ua
 /tmp/
 /benchmark/cannjudge/__init__.py
+/agent-platform/kitex_gen
