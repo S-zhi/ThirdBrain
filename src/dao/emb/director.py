@@ -18,10 +18,22 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import zvec
+
+_last_gc_at = 0.0
+
+
+def maybe_gc(force: bool = False) -> None:
+    """每 60s 最多触发一次全局 GC，避免每个 CollectionSession 退出都阻塞。"""
+    global _last_gc_at
+    now = time.monotonic()
+    if force or now - _last_gc_at > 60:
+        gc.collect()
+        _last_gc_at = now
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +165,7 @@ class CollectionSession:
     def __exit__(self, exc_type, exc, tb) -> None:
         # 显式释放；zvec 0.6 没 close，靠引用释放 + GC
         self._coll = None
-        gc.collect()
+        maybe_gc()
 
 
 # ---------------------------------------------------------------------------
