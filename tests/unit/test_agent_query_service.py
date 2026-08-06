@@ -193,3 +193,177 @@ async def test_batch_keeps_order_ids_and_failure_isolation() -> None:
     assert results[0].result is not None
     assert results[1].error is not None
     assert [record.batch_id for record in writer.records] == ["batch-1", "batch-1"]
+
+
+@pytest.mark.asyncio
+async def test_batch_query_concurrency_and_ordering() -> None:
+    """批量查询应按正确的 commands 顺序并发返回，且能隔离非预期 exception。"""
+    retriever = FakeRetriever()
+    writer = FakeRecordWriter()
+    service = AgentQueryService(retriever, writer, collection_name="api_docs")
+
+    commands = (
+        BatchAgentQueryCommand("first", _command()),
+        BatchAgentQueryCommand("second", _command(AgentQueryType.SEMANTIC)),
+        BatchAgentQueryCommand("third", _command()),
+    )
+
+    results = await service.query_batch(
+        commands,
+        request_id="request-1",
+        batch_id="batch-1",
+        max_concurrency=2,
+    )
+
+    assert len(results) == 3
+    assert [r.custom_id for r in results] == ["first", "second", "third"]
+    assert results[0].result is not None
+    assert results[1].result is not None
+    assert results[2].result is not None
+
+
+@pytest.mark.asyncio
+async def test_batch_query_handles_unexpected_exception() -> None:
+    """批量查询应隔离非预期/裸异常，并返回 UNEXPECTED_ERROR。"""
+    retriever = FakeRetriever()
+    writer = FakeRecordWriter()
+    service = AgentQueryService(retriever, writer, collection_name="api_docs")
+
+    # 模拟 query_once 抛出非 AgentQueryExecutionError 异常
+    async def mock_query_once(*args, **kwargs):
+        raise ValueError("Raw crash")
+
+    service.query_once = mock_query_once
+
+    commands = (BatchAgentQueryCommand("first", _command()),)
+
+    results = await service.query_batch(
+        commands,
+        request_id="request-1",
+        batch_id="batch-1",
+    )
+
+    assert len(results) == 1
+    assert results[0].custom_id == "first"
+    assert results[0].error is not None
+    assert results[0].error.code == "UNEXPECTED_ERROR"
+    assert "ValueError: Raw crash" in results[0].error.message
+
+
+class DummyEmbedder:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_retriever_embedder_reuse_and_close() -> None:
+    """测试 ZvecAgentQueryRetriever 懒加载、复用和 close 行为。"""
+    embedder_instances = []
+
+    def embedder_factory() -> Any:
+        e = DummyEmbedder()
+        embedder_instances.append(e)
+        return e
+
+    from unittest.mock import MagicMock, patch
+
+    from src.service.agent_query_service import ZvecAgentQueryRetriever
+
+    profile = MagicMock()
+    profile.search_similar.return_value = []
+
+    retriever = ZvecAgentQueryRetriever(
+        collection_name="test_coll",
+        embedder_factory=embedder_factory,
+        profile=profile,
+    )
+
+    # 初始无 embedder
+    assert retriever._embedder is None
+    assert len(embedder_instances) == 0
+
+    with patch("src.service.agent_query_service.CollectionSession"):
+        # 首次获取语义查询，懒加载产生第一个 embedder
+        retriever.query_semantic(_command(AgentQueryType.SEMANTIC))
+        assert retriever._embedder is not None
+        assert len(embedder_instances) == 1
+        assert not embedder_instances[0].closed
+
+        # 第二次获取语义查询，复用同一个 embedder
+        retriever.query_semantic(_command(AgentQueryType.SEMANTIC))
+        assert retriever._embedder is embedder_instances[0]
+        assert len(embedder_instances) == 1
+
+    # 调用 close，释放并关闭底层 embedder
+    retriever.close()
+    assert retriever._embedder is None
+    assert embedder_instances[0].closed
+
+
+from pathlib import Path
+
+from src.service.yaml_import_service import (
+    YamlImportBatchStatus,
+    YamlImportCommand,
+    YamlImportItemStatus,
+    YamlImportService,
+)
+
+
+class FakeYamlDAO:
+    def __init__(self) -> None:
+        self.inserted_payloads = []
+
+    async def insert_one(self, collection: str, payload: Any) -> Any:
+        self.inserted_payloads.append(payload)
+
+        class DummyResult:
+            inserted = True
+            document_id = "doc-123"
+
+        return DummyResult()
+
+
+@pytest.mark.asyncio
+async def test_yaml_import_batch_concurrency_and_ordering() -> None:
+    """测试 YamlImportService.import_batch 并发及顺序。"""
+    import tempfile
+    from unittest.mock import patch
+
+    from src.core import ParsedYamlDocument
+    from src.service.yaml_import_service import YamlImportSettings
+
+    dao = FakeYamlDAO()
+    # 临时创建 yaml 文件用于导入校验
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        settings = YamlImportSettings(allowed_roots=[tmp_root])
+        service = YamlImportService(dao, settings=settings)
+
+        # 写入两个临时文件以通过路径存在性校验
+        f1_path = tmp_root / "test1.yaml"
+        f2_path = tmp_root / "test2.yaml"
+        f1_path.write_text("dummy")
+        f2_path.write_text("dummy")
+
+        commands = (
+            YamlImportCommand("id1", str(f1_path), "coll1"),
+            YamlImportCommand("id2", str(f2_path), "coll1"),
+        )
+
+        with patch("src.service.yaml_import_service.read_yaml_document") as mock_read:
+            mock_read.return_value = ParsedYamlDocument(
+                payload={"foo": "bar"},
+                schema_version="2.1",
+            )
+            batch_result = await service.import_batch(commands, max_concurrency=2)
+
+        assert batch_result.status == YamlImportBatchStatus.SUCCEEDED
+        assert batch_result.succeeded_count == 2
+        assert len(batch_result.results) == 2
+        assert batch_result.results[0].custom_id == "id1"
+        assert batch_result.results[0].status == YamlImportItemStatus.INSERTED
+        assert batch_result.results[1].custom_id == "id2"
+        assert batch_result.results[1].status == YamlImportItemStatus.INSERTED

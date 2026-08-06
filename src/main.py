@@ -177,7 +177,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if cfg.embedder.type == "local":
         try:
             import asyncio
+
             from src.dao.emb.embedder import build_embedder
+
             embedder = build_embedder()
             try:
                 await asyncio.to_thread(lambda: embedder.embed_dense("warmup", mode="query"))
@@ -192,6 +194,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        query_service = getattr(app.state, "agent_query_service", None)
+        if query_service is not None and hasattr(query_service, "close"):
+            try:
+                close_result = query_service.close()
+                if inspect.isawaitable(close_result):
+                    await close_result
+            except Exception as error:  # noqa: BLE001 - 关闭期允许降级。
+                logger.warning("agent_query_service.close_error type=%s", type(error).__name__)
+
         llm_client = getattr(app.state, "knowledge_llm_client", None)
         if llm_client is not None:
             try:
