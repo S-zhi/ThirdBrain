@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -2327,7 +2328,13 @@ def write_v21_debug_artifacts(
     """把 Schema 2.1 Pipeline 的各阶段产物写入独立调试目录。"""
     suffix = hashlib.sha256(str(source_path).encode("utf-8")).hexdigest()[:8]
     target = root.expanduser().resolve() / f"{source_path.stem}-{suffix}"
-    target.mkdir(parents=True, exist_ok=True)
+
+    # 用原子方式写入：先写入同级临时目录，成功后再 rename 替换。
+    tmp_target = target.with_suffix(target.suffix + ".tmp")
+    if tmp_target.exists():
+        shutil.rmtree(tmp_target)
+    tmp_target.mkdir(parents=True, exist_ok=False)
+
     artifacts = {
         "01_source.md": result.document["source"]["source_markdown"],
         "02_preprocessed.md": result.document["source"]["preprocess_markdown"],
@@ -2350,8 +2357,18 @@ def write_v21_debug_artifacts(
         "07_ai_response.txt": result.ai_response or "",
         "08_result.yaml": yaml_text,
     }
-    for filename, content in artifacts.items():
-        (target / filename).write_text(content, encoding="utf-8")
+    try:
+        for filename, content in artifacts.items():
+            (tmp_target / filename).write_text(content, encoding="utf-8")
+
+        # 写入成功后，如果要覆盖已有 target，也必须安全清理/替换
+        if target.exists():
+            shutil.rmtree(target)
+        os.replace(tmp_target, target)
+    except Exception:
+        if tmp_target.exists():
+            shutil.rmtree(tmp_target)
+        raise
     return target
 
 
