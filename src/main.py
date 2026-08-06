@@ -15,6 +15,7 @@ from config import get_config
 from src.dao.mongo import MongoBootstrap, MongoDatabase, QueryRecordDAO, YamlDocumentDAO
 from src.dao.redis import RedisDatabase
 from src.gateway import (
+    agent_data_router,
     gateway_router,
     graph_router,
     heatmap_router,
@@ -212,6 +213,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.include_router(agent_data_router)
 app.include_router(gateway_router)
 app.include_router(graph_router)
 app.include_router(heatmap_router)

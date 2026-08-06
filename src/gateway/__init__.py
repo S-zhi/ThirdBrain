@@ -1,5 +1,6 @@
 """Agent API 文档查询 Gateway 对外导出。"""
 
+from src.gateway.agent_data_router import router as agent_data_router
 from src.gateway.graph_router import router as graph_router
 from src.gateway.heatmap_router import router as heatmap_router
 from src.gateway.knowledge_query_router import router as knowledge_query_router
@@ -10,6 +11,7 @@ from src.gateway.router import router as gateway_router
 from src.gateway.yaml_import_router import router as yaml_import_router
 
 __all__ = [
+    "agent_data_router",
     "gateway_router",
     "graph_router",
     "heatmap_router",
