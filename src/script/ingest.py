@@ -279,7 +279,7 @@ class IngestRunRecord(BaseModel):
     sub_directory: str
     collection: str
     dry_run: bool
-    status: Literal["running", "dry_run", "succeeded", "partial", "failed"] = "running"
+    status: Literal["running", "dry_run", "succeeded", "partial", "failed", "skipped"] = "running"
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime | None = None
     discovered_count: int = 0
@@ -470,12 +470,25 @@ def _finalize_status(record: IngestRunRecord) -> None:
     """根据解析和索引结果计算运行终态。"""
     record.finished_at = datetime.now(UTC)
     record.failed_count = len(record.errors)
-    if record.parsed_count == 0 or (not record.dry_run and record.indexed_count == 0):
-        record.status = "failed"
-    elif record.errors:
+    if record.errors:
+        # Real errors (including in-batch duplicate rejections) → partial
         record.status = "partial"
     elif record.dry_run:
         record.status = "dry_run"
+    elif record.parsed_count == 0:
+        # Nothing parsed — genuine failure (bad path / empty input)
+        record.status = "failed"
+    elif (
+        not record.dry_run
+        and record.indexed_count == 0
+        and record.skipped_count == record.parsed_count
+        and record.parsed_count > 0
+    ):
+        # Entire batch was skipped (idempotent / all-duplicate) — success path
+        record.status = "skipped"
+    elif not record.dry_run and record.indexed_count == 0:
+        # Parsed something but indexed nothing and did not skip all — failure
+        record.status = "failed"
     else:
         record.status = "succeeded"
 
