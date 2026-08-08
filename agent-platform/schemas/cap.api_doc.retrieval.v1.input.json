@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query", "wiki_id", "namespace", "version"],
+  "properties": {
+    "query": {"type": "string", "minLength": 1, "maxLength": 512},
+    "wiki_id": {"type": "string", "minLength": 1},
+    "namespace": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "language": {"type": ["string", "null"]},
+    "max_results": {"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+    "top_k": {"type": "integer", "minimum": 1, "maximum": 50},
+    "budget": {"type": "string", "enum": ["micro", "small", "medium", "large"]},
+    "include_stale": {"type": "boolean"},
+    "expand_relations": {"type": "boolean"},
+    "relation_limit": {"type": "integer", "minimum": 0, "maximum": 20}
+  }
+}

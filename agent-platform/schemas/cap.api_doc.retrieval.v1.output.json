@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["results", "returned_count"],
+  "properties": {
+    "results": {"type": "array"},
+    "returned_count": {"type": "integer", "minimum": 0},
+    "loop_hint": {"type": "object"}
+  }
+}

@@ -28,9 +28,13 @@ func main() {
 	dataClient := coredata.NewClient(
 		cfg.CoreDataBaseURL,
 		cfg.CoreDataAPIKey,
-		cfg.CoreDataHTTPTimeout,
+		cfg.CapabilityTimeout,
 	)
-	handler := NewAgentPlatformServiceImpl(workflow.NewKnowledgeAssistWorkflow(dataClient))
+	handler := NewAgentPlatformServiceImplWithTimeout(
+		workflow.NewKnowledgeAssistWorkflow(dataClient),
+		cfg.CapabilityTimeout,
+		dataClient,
+	)
 	svr := agentplatform.NewServer(
 		handler,
 		server.WithServiceAddr(address),

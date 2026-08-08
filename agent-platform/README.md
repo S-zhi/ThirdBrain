@@ -19,6 +19,8 @@ export AGENT_PLATFORM_LISTEN_ADDR=:8890
 export AGENT_PLATFORM_CORE_RPC_KEY=replace-with-core-rpc-key
 export AGENT_PLATFORM_CORE_DATA_URL=http://127.0.0.1:8000
 export AGENT_PLATFORM_CORE_DATA_KEY=replace-with-agent-platform-key
+# Optional; defaults to 30000 and is shared by Kitex handler and Core HTTP client.
+export AGENT_PLATFORM_TIMEOUT_MS=30000
 go run .
 ```
 

@@ -27,14 +27,23 @@
 ## 2. 技术栈（待用户最终确认）
 
 - **语言**：Python 3.11+（主，检索/摄取/评测），TypeScript（CLI/可视化）
+- **Agent Platform**：Go（并发运行时与统一调用层）+ Eino（Agent / Workflow 编排）。Go 平台通过稳定的进程间或网络契约接入既有 Python 检索、摄取与评测能力；不要将 Agent SDK 耦合到某个 Python 内部实现。
 - **服务**：FastAPI + pydantic v2
 - **依赖管理**：`uv`
-- **存储**：Postgres + pgvector（默认）/ Qdrant 二选一
+- **存储（当前实现）**：MongoDB（事实、发布状态与查询留痕）+ Zvec（进程内、可重建的派生索引）；Agent 中台不得新增独立数据库
 - **LLM**：OpenAI / Anthropic / 本地 vLLM 抽象层，按 case 切换
 - **质量**：ruff + mypy(strict) + pytest
 - **可观测**：OpenTelemetry → Trace 五阶段结构化落库
 
 > 用户拍板前先按默认推进。任何一项被否决，更新本节并同步 `docs/architecture.md`。
+
+### Agent Platform 约束
+
+- Agent 能力以静态声明注册，声明必须包含：能力 ID、分类、输入/输出 schema、版本、兼容范围、超时、权限边界与脱敏字段。
+- v1 中 Core 仅可经 Kitex 请求 Agent Platform 的只读统一检索；Platform 再调用既有 Python 编排。摄取、Knowledge 编译、Pipeline 与 Benchmark 保持 Python 侧受控离线能力，不向 Core/Agent Platform 路由；禁止 Agent 直接访问任意文件、网络、密钥或未登记工具。
+- 统一调用内核负责上下文传播、deadline/cancel、错误码归一、调用链 trace 与结构化脱敏日志。业务 Agent 不得各自实现重试、超时和日志脱敏策略。
+- 本地配置、启动/停止/健康检查、能力发现和版本兼容校验属于平台生命周期；不满足兼容约束的能力不得被路由。
+- Pipeline Skill 与 Benchmark 辅助能力为离线能力，不可由在线 Agent 请求路径直接调用；其结果须可复现并带版本标识。
 
 ## 3. 目录结构
 
@@ -48,9 +57,10 @@
 ├── benchmark/       # API-RAG Benchmark：cases、runner、归因报告
 ├── service/         # FastAPI 入口（检索 / 摄取 / 评测 API）
 ├── cli/             # 维护者 CLI：摄取、跑评测、看 trace
+├── agent-platform/  # Go + Eino：Capability SDK、注册发现、调用内核、生命周期与编排
 ├── tests/
 │   ├── unit/        # 单测
-│   ├── integration/ # 集成（需本地 Postgres + pgvector）
+│   ├── integration/ # 集成（需本地 MongoDB；部分场景需 Zvec / 外部 API）
 │   └── benchmark/   # 评测 case（默认禁跑，CI 单独触发）
 └── data/            # 离线语料、fixtures（不入仓）
 ```
@@ -66,7 +76,7 @@
   - 标识符英文；注释与文档中文
 - **测试**：
   - 任何新行为必须有单测；新检索策略必须有 Benchmark case
-  - 集成测试需 `tests/integration/conftest.py` 中的本地 Postgres+pgvector fixture
+  - 集成测试需使用本地 MongoDB fixture；涉及向量检索时使用 Zvec fixture 或临时 collection
   - 评测 case 走 JSON/YAML，schema 见 `docs/benchmark.md`
 - **PR 模板**：必须勾选"对应 PRD 痛点"（P1–P5 之一），否则不 merge
 
@@ -108,6 +118,7 @@
 - `docs/benchmark.md` — 评测协议、归因报告模板、回归流程
 - `docs/ingest-sources.md` — 文档源白名单与同步策略
 - `docs/decisions/` — ADR 记录每个 Open Decision 的最终拍板
+- `docs/decisions/ADR-0001-agent-platform-capability-boundary.md` — Agent 中台能力分类、v1 白名单与 Kitex/CLI/HTTP 边界
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

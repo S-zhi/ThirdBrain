@@ -30,3 +30,28 @@ func TestLoadRejectsCoreDataURLWithQuery(t *testing.T) {
 		t.Fatal("expected Core data URL query to be rejected")
 	}
 }
+
+func TestLoadUsesOneCapabilityTimeout(t *testing.T) {
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_URL", "http://127.0.0.1:8000")
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_KEY", "data-secret")
+	t.Setenv("AGENT_PLATFORM_CORE_RPC_KEY", "rpc-secret")
+	t.Setenv("AGENT_PLATFORM_TIMEOUT_MS", "12000")
+
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.CapabilityTimeout != config.CoreDataHTTPTimeout {
+		t.Fatalf("timeouts diverged: %+v", config)
+	}
+}
+
+func TestLoadRejectsTimeoutAboveCapabilityMaximum(t *testing.T) {
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_URL", "http://127.0.0.1:8000")
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_KEY", "data-secret")
+	t.Setenv("AGENT_PLATFORM_CORE_RPC_KEY", "rpc-secret")
+	t.Setenv("AGENT_PLATFORM_TIMEOUT_MS", "30001")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected timeout limit to be enforced")
+	}
+}
