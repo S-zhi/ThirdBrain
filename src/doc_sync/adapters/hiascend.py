@@ -701,6 +701,24 @@ class HiascendSourceAdapter(HttpDocumentSourceAdapter):
         ]
         page_id = str(ref.metadata.get("page_id") or self._page_id(ref.canonical_uri)).strip()
         title_hint = str(ref.title_hint or "").strip()
+
+        # 1. 优先根据 data-item 属性精确匹配 page_id
+        for article in candidates:
+            node = article
+            data_item = None
+            while node:
+                if isinstance(node, Tag) and node.has_attr("data-item"):
+                    data_item = node["data-item"]
+                    break
+                node = node.parent
+            if data_item:
+                data_item_str = str(data_item).strip()
+                if data_item_str:
+                    data_page_id = Path(unquote(urlparse(data_item_str).path)).stem
+                    if data_page_id.casefold() == page_id.casefold():
+                        return article
+
+        # 2. 回退到 H1/标题 匹配
         expected_titles = {value.casefold() for value in (page_id, title_hint) if value}
         for article in candidates:
             for selector in self.options.selectors.title:
