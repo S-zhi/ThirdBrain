@@ -13,15 +13,20 @@ const (
 	defaultListenAddress = ":8890"
 	defaultAgentTimeout  = 30 * time.Second
 	maxAgentTimeout      = 30 * time.Second
+	defaultAgentModelURL = "https://api.openai.com/v1"
 )
 
-// Config contains only middleware configuration. It deliberately has no
-// database, vector-store, LLM-provider, or source-crawler settings.
+// Config contains process wiring and the optional OpenAI-compatible model
+// settings used to construct the public Eino Agent. It still has no database,
+// vector-store, or source-crawler settings.
 type Config struct {
-	ListenAddress   string
-	CoreRPCAPIKey   string
-	CoreDataBaseURL string
-	CoreDataAPIKey  string
+	ListenAddress     string
+	CoreRPCAPIKey     string
+	CoreDataBaseURL   string
+	CoreDataAPIKey    string
+	AgentModelAPIKey  string
+	AgentModelBaseURL string
+	AgentModelName    string
 	// CapabilityTimeout is the single deadline shared by the Kitex handler and
 	// the private Core HTTP client.
 	CapabilityTimeout   time.Duration
@@ -66,6 +71,13 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("AGENT_PLATFORM_TIMEOUT_MS must not exceed %dms", maxAgentTimeout/time.Millisecond)
 	}
 
+	agentModelBaseURL := strings.TrimRight(strings.TrimSpace(os.Getenv("AGENT_PLATFORM_LLM_BASE_URL")), "/")
+	if agentModelBaseURL == "" {
+		agentModelBaseURL = defaultAgentModelURL
+	}
+	agentModelName := strings.TrimSpace(os.Getenv("AGENT_PLATFORM_LLM_MODEL"))
+	agentModelAPIKey := strings.TrimSpace(os.Getenv("AGENT_PLATFORM_LLM_API_KEY"))
+
 	listenAddress := strings.TrimSpace(os.Getenv("AGENT_PLATFORM_LISTEN_ADDR"))
 	if listenAddress == "" {
 		listenAddress = defaultListenAddress
@@ -76,6 +88,9 @@ func Load() (Config, error) {
 		CoreRPCAPIKey:       coreRPCAPIKey,
 		CoreDataBaseURL:     baseURL,
 		CoreDataAPIKey:      apiKey,
+		AgentModelAPIKey:    agentModelAPIKey,
+		AgentModelBaseURL:   agentModelBaseURL,
+		AgentModelName:      agentModelName,
 		CapabilityTimeout:   timeout,
 		CoreDataHTTPTimeout: timeout,
 	}, nil

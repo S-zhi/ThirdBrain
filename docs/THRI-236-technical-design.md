@@ -6,22 +6,24 @@
 
 ## 1. 方案结论
 
-在 Agent Platform（Go）新增一个静态注册的只读能力
-`cap.api_doc.retrieval.v1`。它经由统一调用内核完成请求校验、trace 上下文、30 秒超时、
-错误归一与脱敏审计，再以**私有 HTTP 适配器**调用既有 Python Knowledge HTTP 查询入口。
+在 Agent Platform（Go + Eino）新增一个静态注册的只读能力
+`cap.api_doc.agent.v1`。Kitex Handler 负责请求契约、trace 上下文和 30 秒超时，之后交给
+Eino ReAct Agent。Agent 强制先调用一次白名单工具，再以**私有 HTTP 适配器**调用既有
+Python Knowledge 数据入口；旧的 `cap.api_doc.retrieval.v1` 只保留为兼容别名。
 
 适配器只做字段映射和契约归一；不包含检索、排序、索引或缓存逻辑。已有的维护 CLI 与
 `POST /api/v1/knowledge/query` 保持原样，仍由其原有调用者直接使用。
 
 ```mermaid
 flowchart LR
-    C["调用方 / Eino 编排"] -->|Kitex Invoke| K["CapabilityService\n统一调用内核"]
-    K --> V["SDK Schema 校验\ntrace / timeout / audit"]
-    V --> H["api_doc_retrieval Handler"]
+    C["调用方"] -->|Kitex Invoke| K["Capability Handler\ncontract / trace / timeout"]
+    K --> A["Eino ReAct Agent"]
+    A -->|强制一次| T["tool.api_doc.retrieve.v1"]
+    T --> H["API 文档 Adapter"]
     H -->|私有 HTTP；鉴权透传| G["Python Knowledge Gateway"]
     G --> Q["KnowledgeQueryService\n既有检索业务"]
-    Q --> G --> H
-    H --> N["输出/错误归一"] --> K --> C
+    Q --> G --> H --> T --> A
+    A --> N["引用校验\nanswer / abstained"] --> K --> C
     CLI["既有 CLI"] --> Q
     HTTP["既有 HTTP 客户端"] --> G
 ```
@@ -34,7 +36,7 @@ flowchart LR
 | 既有 HTTP 入参 | 当前要求 `query`、`wiki_id`、`namespace`、`version`，可选 `top_k` 等字段；与 THRI-240 的能力入参不是一一相同。 |
 | 当前 Go 中台 | 仅有 `knowledge.retrieve_context.v1` / `ExecuteKnowledgeAssist`，不能承载本需求的通用 Capability `Discover/Invoke` 契约。 |
 | 接入方式 | 优先 HTTP；不把 CLI 当作线上请求回退通道。CLI 回退会产生进程管理、退出码解析和鉴权语义不确定性，且“下游不可达”不应被静默掩盖。若未来确需本地 CLI 模式，应作为显式配置的独立 adapter 并单独验收。 |
-| 存储与安全 | Agent Platform 不接入 MongoDB/Zvec/LLM；不新增凭据、数据库或鉴权体系。 |
+| 存储与安全 | Agent Platform 不接入 MongoDB/Zvec；只读取已有 Core 数据面，并通过 OpenAI-compatible 配置使用 Eino 模型；不新增业务数据库。 |
 
 **需评审确认的矛盾**：PRD A-07 写有“HTTP 不可用时回退 CLI”，但 F-05、E-01 及 AC-03
 要求下游不可达返回 `DEPENDENCY_FAILED`。本方案以可观测、确定的错误语义为准：v1 不自动
@@ -50,19 +52,22 @@ flowchart LR
 | `internal/invocation`（THRI-235） | 能力查找、状态判断、SDK schema 校验、deadline/cancel、trace、审计与统一错误响应。 | handler 自行实现重试、日志脱敏或超时。 |
 | `internal/adapter/knowledgequery` | 把能力请求映射成 Python HTTP 请求；透传鉴权与 trace；将响应解码成领域无关 DTO。 | 调整 Python API 响应、修改检索排序。 |
 | `internal/handler/apidocretrieval` | 调 adapter，做结果字段补齐/约束校验、最多截断 `max_results` 条。 | 访问存储、缓存或调用 CLI。 |
+| `internal/agent` | 创建 Eino ReAct Agent，控制系统提示、工具调用次数、deadline/cancel 和答案/引用输出。 | 访问任意工具、修改请求 scope、绕过结果校验。 |
+| `internal/agenttool/apidoc` | 将已有 adapter 封装成 Eino 白名单工具，并校验工具参数。 | 新增检索算法、持有 provider 密钥或访问任意网络。 |
 | `internal/audit` | 本地结构化调用记录；统一字段脱敏。 | 记录 query、正文、Token 或完整 URL。 |
 | Python Knowledge Gateway | 保持既有认证、请求和响应语义；若当前字段无法提供 PRD 要求的溯源字段，仅增加**私有适配 DTO**，不改变公开端点。 | 为中台复制一套检索实现。 |
 
 ### 3.2 调用顺序
 
-1. Kitex `CapabilityService.Invoke` 接收能力 ID、payload、trace/caller/鉴权元数据。
-2. 内核查 manifest：不存在、`disabled`、`offline` 立即返回规范失败响应。
-3. THRI-242 校验器按 `cap.api_doc.retrieval.v1.input.json` 校验 payload，并拒绝敏感字段名。
-4. 若无 `trace_id`，生成 UUIDv4；嵌套调用直接继承父 trace。
-5. 内核将有效 deadline 限制为 `min(调用方 deadline, 30000ms)`，并传给 handler。
-6. handler 映射请求并调用 Knowledge HTTP adapter；该调用不自动重试。
-7. handler 校验下游响应，截断到 `max_results`，保证 `returned_count == len(results)`。
-8. 内核写入脱敏 audit start/end，返回 `InvokeResponse`。
+1. Kitex `Invoke` 接收能力 ID、payload、trace/caller 和可选 timeout。
+2. Handler 校验 JSON envelope、必填 scope、结果数量和未知/敏感字段，并将 deadline 限制在 30 秒内。
+3. Eino ReAct Agent 接收经过校验的 query 和 scope；首轮模型请求强制选择
+   `tool.api_doc.retrieve.v1`。
+4. 工具参数处理器覆盖模型传入的 `wiki_id`、`namespace`、`version`，并再次校验 query、数量和预算。
+5. 工具调用既有 API 文档 adapter；adapter 继续负责私有 HTTP、鉴权和下游结果归一。
+6. Tool middleware 限制每次 Agent 运行最多一次工具调用，并记录调用数和耗时。
+7. Agent 校验 `returned_count`、source path、score、snippet 和时间；无命中时返回 `abstained`，不猜测。
+8. Handler 将带引用、tool_calls、elapsed_ms 和 trace_id 的结果序列化为 `InvokeResponse`。
 
 ## 4. 契约设计
 
@@ -164,6 +169,9 @@ flowchart LR
 | --- | --- |
 | `KNOWLEDGE_QUERY_BASE_URL` | 既有 Knowledge HTTP 服务基地址。 |
 | `AGENT_PLATFORM_TIMEOUT_MS` | 进程唯一超时配置；默认 30000ms，启动时拒绝超过 manifest 最大值的配置，并同时作用于 Kitex handler 与 Core HTTP client。 |
+| `AGENT_PLATFORM_LLM_API_KEY` | Eino 使用的 OpenAI-compatible provider key；缺失时不装配在线 API 文档 Agent。 |
+| `AGENT_PLATFORM_LLM_BASE_URL` | OpenAI-compatible provider 地址，默认 `https://api.openai.com/v1`。 |
+| `AGENT_PLATFORM_LLM_MODEL` | Agent 使用的模型名；缺失时 `Invoke` 返回 `CAPABILITY_UNAVAILABLE`，不直连 adapter。 |
 | `KNOWLEDGE_QUERY_AUTH_FORWARDING` | 允许的鉴权头名单与透传开关；默认仅 `Authorization` 和既有服务密钥头。 |
 | `AGENT_PLATFORM_AUDIT_PATH` | 本地 JSONL 调用记录位置。 |
 
@@ -204,9 +212,9 @@ flowchart LR
 ## 7. 实施拆分与依赖顺序
 
 1. **契约对齐**：冻结 THRI-240 §5.1 与既有 HTTP 输入/输出的映射，确认 scope 路由字段与结果溯源字段来源。
-2. **注册与调用内核**：完成 Capability `Discover/Invoke` 通用面、SDK schema 接入、manifest 加载和审计基础设施（依赖 THRI-234/235/242）。
+2. **注册与 Agent 服务**：完成 Capability `Discover/Invoke` 通用面、Eino ReAct Agent、工具白名单、调用次数限制和结果校验。
 3. **HTTP Adapter**：实现 allowlist 鉴权透传、deadline、有限响应体、错误分类；不做 CLI fallback。
-4. **Handler 与 DTO**：实现输入映射、下游结果归一、输出 schema 校验和 manifest 注册。
+4. **Handler 与 DTO**：实现 Agent envelope 映射、下游结果归一、输出 schema 校验和静态 descriptor 注册。
 5. **回归与基准**：补 BDD/集成、直调兼容测试、P95 对比和 doctor 自检。
 6. **灰度启用**：先以 `experimental` 在本地/测试环境验证；验收后升为 `available`。若 PRD 强制 v1 初始即 `available`，则在发布流程中以配置开关控制路由而不改 manifest 语义。
 

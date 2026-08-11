@@ -8,6 +8,8 @@ const KnowledgeRetrieveContextV1ID = "knowledge.retrieve_context.v1"
 
 const APIDocRetrievalV1ID = "cap.api_doc.retrieval.v1"
 
+const APIDocAgentV1ID = "cap.api_doc.agent.v1"
+
 // Descriptor records the governance contract for one statically wired capability.
 type Descriptor struct {
 	ID                  string
@@ -66,6 +68,27 @@ func APIDocRetrievalV1() Descriptor {
 		VersionStrategy:     "breaking changes require a new capability ID",
 		Timeout:             30 * time.Second,
 		Dependency:          "knowledge.query",
+		Permission:          "knowledge.query.read",
+		RedactedFields:      [3]string{"authorization", "x-agent-platform-key", "query"},
+	}
+}
+
+// APIDocAgentV1 returns the public Eino-backed API documentation Agent.
+func APIDocAgentV1() Descriptor {
+	return Descriptor{
+		ID:                  APIDocAgentV1ID,
+		Category:            "api_doc_agent",
+		Version:             "v1.0.0",
+		Compatibility:       "Agent Platform v1; Eino ReAct Agent; API retrieval tool v1",
+		InvocationMode:      "online/synchronous",
+		Risk:                "read-only",
+		InputContractOwner:  "THRI-240 §5.1",
+		OutputContractOwner: "Agent Platform API document Agent",
+		InputSchema:         "schemas/cap.api_doc.agent.v1.input.json",
+		OutputSchema:        "schemas/cap.api_doc.agent.v1.output.json",
+		VersionStrategy:     "breaking changes require a new capability ID",
+		Timeout:             30 * time.Second,
+		Dependency:          "tool.api_doc.retrieve.v1",
 		Permission:          "knowledge.query.read",
 		RedactedFields:      [3]string{"authorization", "x-agent-platform-key", "query"},
 	}

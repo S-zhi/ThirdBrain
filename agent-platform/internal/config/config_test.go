@@ -46,6 +46,38 @@ func TestLoadUsesOneCapabilityTimeout(t *testing.T) {
 	}
 }
 
+func TestLoadReadsOptionalAgentModelSettings(t *testing.T) {
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_URL", "http://127.0.0.1:8000")
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_KEY", "data-secret")
+	t.Setenv("AGENT_PLATFORM_CORE_RPC_KEY", "rpc-secret")
+	t.Setenv("AGENT_PLATFORM_LLM_API_KEY", "llm-secret")
+	t.Setenv("AGENT_PLATFORM_LLM_BASE_URL", "https://llm.example.test/v1/")
+	t.Setenv("AGENT_PLATFORM_LLM_MODEL", "model-1")
+
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentModelAPIKey != "llm-secret" || config.AgentModelBaseURL != "https://llm.example.test/v1" || config.AgentModelName != "model-1" {
+		t.Fatalf("agent model settings = %+v", config)
+	}
+}
+
+func TestLoadUsesOpenAICompatibleModelURLByDefault(t *testing.T) {
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_URL", "http://127.0.0.1:8000")
+	t.Setenv("AGENT_PLATFORM_CORE_DATA_KEY", "data-secret")
+	t.Setenv("AGENT_PLATFORM_CORE_RPC_KEY", "rpc-secret")
+	t.Setenv("AGENT_PLATFORM_LLM_BASE_URL", "")
+
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentModelBaseURL != defaultAgentModelURL {
+		t.Fatalf("default model URL = %q", config.AgentModelBaseURL)
+	}
+}
+
 func TestLoadRejectsTimeoutAboveCapabilityMaximum(t *testing.T) {
 	t.Setenv("AGENT_PLATFORM_CORE_DATA_URL", "http://127.0.0.1:8000")
 	t.Setenv("AGENT_PLATFORM_CORE_DATA_KEY", "data-secret")
