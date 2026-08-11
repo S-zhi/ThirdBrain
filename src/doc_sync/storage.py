@@ -252,6 +252,54 @@ class SyncStorage:
         """清理超过保留期的运行目录与 journal，永久保留同步 state。"""
         cutoff = datetime.now(UTC) - timedelta(days=self.config.runtime.retention_days)
         removed: list[Path] = []
+
+        # 收集所有配置/默认的 rendered_html 目录
+        html_directories: set[Path] = set()
+        default_dir = Path("./data/doc_sync/rendered_html")
+        html_directories.add(
+            default_dir.resolve() if default_dir.is_absolute() else (self.config.workspace_root / default_dir).resolve()
+        )
+        html_directories.add((self.root / "rendered_html").resolve())
+        for source in self.config.sources:
+            if hasattr(source, "adapter") and source.adapter.type == "hiascend":
+                options = source.adapter.options
+                if isinstance(options, dict):
+                    browser_opts = options.get("browser")
+                    if isinstance(browser_opts, dict):
+                        html_dir_raw = browser_opts.get("rendered_html_directory")
+                        if html_dir_raw:
+                            html_dir = Path(html_dir_raw)
+                            resolved_dir = html_dir.resolve() if html_dir.is_absolute() else (self.config.workspace_root / html_dir).resolve()
+                            html_directories.add(resolved_dir)
+
+        # 清理超期的 html 缓存文件及空目录
+        for html_dir in html_directories:
+            if not html_dir.exists():
+                continue
+            for root, dirs, files in os.walk(html_dir, topdown=False):
+                for filename in files:
+                    filepath = Path(root) / filename
+                    try:
+                        modified = datetime.fromtimestamp(filepath.stat().st_mtime, tz=UTC)
+                        if modified < cutoff:
+                            resolved_file = filepath.resolve()
+                            if resolved_file.is_relative_to(html_dir.resolve()):
+                                resolved_file.unlink()
+                                removed.append(resolved_file)
+                    except OSError:
+                        pass
+                # 自底向上清理空子目录
+                for dirname in dirs:
+                    dirpath = Path(root) / dirname
+                    try:
+                        resolved_dir = dirpath.resolve()
+                        if resolved_dir.is_relative_to(html_dir.resolve()):
+                            if not any(dirpath.iterdir()):
+                                dirpath.rmdir()
+                                removed.append(resolved_dir)
+                    except OSError:
+                        pass
+
         for parent in (
             self.run_directory,
             self.staging_directory,

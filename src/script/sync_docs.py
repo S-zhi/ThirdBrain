@@ -42,6 +42,16 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--limit", type=int, help="限制每个 source 最多处理 N 页")
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="分批执行的每批最大页面数",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        help="从指定 document_id (含) 开始增量同步/自举",
+    )
+    parser.add_argument(
         "--trigger",
         choices=["manual", "scheduled"],
         default="manual",
@@ -88,6 +98,8 @@ async def _run(args: argparse.Namespace) -> tuple[str, str, int]:
             selected_source_ids=set(args.sources) if args.sources else None,
             limit=args.limit,
             trigger=args.trigger,
+            batch_size=getattr(args, "batch_size", None),
+            resume_from=getattr(args, "resume_from", None),
         )
     exit_code = 0
     if manifest.status == "partial":
