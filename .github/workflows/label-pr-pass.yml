@@ -1,0 +1,33 @@
+name: 【临时】Label new PR as Pass
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+jobs:
+  add-pass-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure Pass label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh label list --repo "${{ github.repository }}" --search "Pass" --json name --jq '.[].name' | grep -qx "Pass"; then
+            gh label create "Pass" \
+              --repo "${{ github.repository }}" \
+              --color "0E8A16" \
+              --description "Quick-iteration pass tag for new PRs"
+          fi
+
+      - name: Add Pass label to this PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --add-label "Pass"
