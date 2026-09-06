@@ -571,6 +571,8 @@ class DocumentSyncService:
         *,
         run_id: str,
         limit: int | None,
+        batch_size: int | None = None,
+        resume_from: str | None = None,
     ) -> SourceExecution:
         """执行单个 source 的发现、决策和 staging。"""
         target_directory = self.config.source_target(source)
@@ -614,11 +616,26 @@ class DocumentSyncService:
                 )
             else:
                 refs_by_id[ref.document_id] = ref
+
+        # Sort candidate references lexicographically by document_id
+        sorted_refs = sorted(refs_by_id.values(), key=lambda r: r.document_id)
+        if resume_from:
+            sorted_refs = [ref for ref in sorted_refs if ref.document_id >= resume_from]
+        if batch_size is not None:
+            sorted_refs = sorted_refs[:batch_size]
+
+        discover_limit = limit
+        if batch_size is not None:
+            if discover_limit is None:
+                discover_limit = batch_size
+            else:
+                discover_limit = min(discover_limit, batch_size)
+
         parsed, missing, failed = await self._discover(
             adapter,
-            list(refs_by_id.values()),
+            sorted_refs,
             context,
-            limit=limit,
+            limit=discover_limit,
         )
         documents: list[DocumentManifestEntry] = []
         state_entries = dict(old_entries)
@@ -797,12 +814,16 @@ class DocumentSyncService:
         selected_source_ids: set[str] | None = None,
         limit: int | None = None,
         trigger: str = "manual",
+        batch_size: int | None = None,
+        resume_from: str | None = None,
     ) -> tuple[RunManifest, Path]:
         """执行 bootstrap/sync，保存 manifest 并返回路径。"""
         if mode not in {"bootstrap", "sync"}:
             raise ValueError(f"不支持的同步 mode: {mode}")
         if limit is not None and limit <= 0:
             raise ValueError("limit 必须大于 0")
+        if batch_size is not None and batch_size <= 0:
+            raise ValueError("batch-size 必须大于 0")
         self.storage.ensure_directories()
         enabled_sources = [
             source
@@ -832,6 +853,8 @@ class DocumentSyncService:
                             context,
                             run_id=run_id,
                             limit=limit,
+                            batch_size=batch_size,
+                            resume_from=resume_from,
                         )
                     except Exception as exc:  # noqa: BLE001
                         run_errors.append(f"source {source.id!r} 失败: {type(exc).__name__}: {exc}")

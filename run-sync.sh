@@ -7,6 +7,8 @@
 #   ./run-sync.sh --foreground          # 前台运行（阻塞当前 shell）
 #   ./run-sync.sh --timeout 1800        # 自定义超时（秒）
 #   ./run-sync.sh --trigger manual      # 写入 manifest 的触发来源（manual / scheduled）
+#   ./run-sync.sh --batch-size 100      # 分批执行的每批最大页面数
+#   ./run-sync.sh --resume-from doc_id  # 从指定 document_id (含) 开始增量同步/自举
 #   ./run-sync.sh -h | --help
 #
 # 产物:
@@ -31,6 +33,8 @@ APPLY=true
 FOREGROUND=false
 TIMEOUT=3600
 TRIGGER=scheduled
+BATCH_SIZE=""
+RESUME_FROM=""
 CONFIG=configs/document_sync.yaml
 LOG_DIR=data/doc_sync/logs
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -40,7 +44,7 @@ META_FILE="$LOG_DIR/run-${TIMESTAMP}.meta"
 
 # === 参数解析 ==============================================================
 print_help() {
-  sed -n '2,18p' "$0"
+  sed -n '2,20p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -54,6 +58,12 @@ while [[ $# -gt 0 ]]; do
     --trigger)
       [[ $# -ge 2 ]] || { echo "--trigger 需要参数" >&2; exit 64; }
       TRIGGER="$2"; shift 2 ;;
+    --batch-size)
+      [[ $# -ge 2 ]] || { echo "--batch-size 需要参数" >&2; exit 64; }
+      BATCH_SIZE="$2"; shift 2 ;;
+    --resume-from)
+      [[ $# -ge 2 ]] || { echo "--resume-from 需要参数" >&2; exit 64; }
+      RESUME_FROM="$2"; shift 2 ;;
     --config)
       [[ $# -ge 2 ]] || { echo "--config 需要参数" >&2; exit 64; }
       CONFIG="$2"; shift 2 ;;
@@ -84,6 +94,8 @@ fi
 
 # 构造命令
 CMD_ARGS=(sync --config "$CONFIG" --trigger "$TRIGGER")
+[[ -n "$BATCH_SIZE" ]] && CMD_ARGS+=(--batch-size "$BATCH_SIZE")
+[[ -n "$RESUME_FROM" ]] && CMD_ARGS+=(--resume-from "$RESUME_FROM")
 $APPLY && CMD_ARGS+=(--apply)
 
 # 写 meta
