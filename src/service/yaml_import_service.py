@@ -230,15 +230,19 @@ class YamlImportService:
     async def import_batch(
         self,
         commands: Sequence[YamlImportCommand],
+        *,
+        max_concurrency: int = 8,
     ) -> BatchYamlImportResult:
-        """按请求顺序批量导入，并将每个文件的失败限制在单项内。"""
-        results = tuple([await self._import_one(command) for command in commands])
-        failed_count = sum(
-            result.status == YamlImportItemStatus.FAILED for result in results
-        )
-        duplicate_count = sum(
-            result.status == YamlImportItemStatus.DUPLICATE for result in results
-        )
+        """并发导入，结果按输入顺序返回，并将每个文件的失败限制在单项内。"""
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _run_one(command: YamlImportCommand) -> YamlImportItemResult:
+            async with semaphore:
+                return await self._import_one(command)
+
+        results = tuple(await asyncio.gather(*(_run_one(cmd) for cmd in commands)))
+        failed_count = sum(result.status == YamlImportItemStatus.FAILED for result in results)
+        duplicate_count = sum(result.status == YamlImportItemStatus.DUPLICATE for result in results)
         succeeded_count = len(results) - failed_count
         if failed_count == 0:
             status = YamlImportBatchStatus.SUCCEEDED

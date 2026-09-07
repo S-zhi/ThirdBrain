@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -194,6 +195,8 @@ class ZvecAgentQueryRetriever:
         self._collection_name = collection_name
         self._embedder_factory = embedder_factory
         self._profile = profile or get_rag_profile()
+        self._embedder: Embedder | None = None
+        self._embedder_lock = threading.Lock()
 
     @staticmethod
     def _to_search_query(command: AgentQueryCommand) -> SearchQuery:
@@ -212,18 +215,30 @@ class ZvecAgentQueryRetriever:
         with CollectionSession(self._collection_name, read_only=True) as collection:
             return self._profile.search_exact(collection, self._to_search_query(command))
 
+    def _get_embedder(self) -> Embedder:
+        """以线程安全且懒加载的方式获取/创建复用的 embedder。"""
+        if self._embedder is None:
+            with self._embedder_lock:
+                if self._embedder is None:
+                    self._embedder = self._embedder_factory()
+        return self._embedder
+
     def query_semantic(self, command: AgentQueryCommand) -> list[SearchResult]:
-        """创建临时 embedder 并执行单路 dense 语义查询。"""
-        embedder = self._embedder_factory()
-        try:
-            with CollectionSession(self._collection_name, read_only=True) as collection:
-                return self._profile.search_similar(
-                    collection,
-                    self._to_search_query(command),
-                    embedder,
-                )
-        finally:
-            embedder.close()
+        """使用长生命周期/复用的 embedder 执行单路 dense 语义查询。"""
+        embedder = self._get_embedder()
+        with CollectionSession(self._collection_name, read_only=True) as collection:
+            return self._profile.search_similar(
+                collection,
+                self._to_search_query(command),
+                embedder,
+            )
+
+    def close(self) -> None:
+        """关闭并释放长生命周期的 embedder 实例。"""
+        with self._embedder_lock:
+            if self._embedder is not None:
+                self._embedder.close()
+                self._embedder = None
 
 
 def _string_field(fields: dict[str, object], name: str) -> str:
@@ -489,20 +504,22 @@ class AgentQueryService:
         *,
         request_id: str,
         batch_id: str,
+        max_concurrency: int = 8,
     ) -> tuple[BatchAgentQueryResult, ...]:
-        """按输入顺序串行查询，并将每个失败限制在对应 custom_id 内。"""
-        results: list[BatchAgentQueryResult] = []
-        for item in commands:
-            try:
-                result = await self.query_once(
-                    item.query,
-                    request_id=request_id,
-                    batch_id=batch_id,
-                    custom_id=item.custom_id,
-                )
-            except AgentQueryExecutionError as error:
-                results.append(
-                    BatchAgentQueryResult(
+        """并发跑 N 个 query，结果按输入顺序返回。"""
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _run_one(item: BatchAgentQueryCommand) -> BatchAgentQueryResult:
+            async with semaphore:
+                try:
+                    result = await self.query_once(
+                        item.query,
+                        request_id=request_id,
+                        batch_id=batch_id,
+                        custom_id=item.custom_id,
+                    )
+                except AgentQueryExecutionError as error:
+                    return BatchAgentQueryResult(
                         custom_id=item.custom_id,
                         query_record_id=error.query_record_id,
                         record_status=error.record_status,
@@ -511,17 +528,29 @@ class AgentQueryService:
                             message=str(error),
                         ),
                     )
-                )
-                continue
-            results.append(
-                BatchAgentQueryResult(
+                except Exception as error:  # noqa: BLE001 - 兜底非预期异常
+                    return BatchAgentQueryResult(
+                        custom_id=item.custom_id,
+                        query_record_id="",
+                        record_status=RecordPersistenceStatus.FAILED,
+                        error=AgentQueryItemError(
+                            code="UNEXPECTED_ERROR",
+                            message=f"{type(error).__name__}: {error}",
+                        ),
+                    )
+                return BatchAgentQueryResult(
                     custom_id=item.custom_id,
                     query_record_id=result.query_record_id,
                     record_status=result.record_status,
                     result=result,
                 )
-            )
-        return tuple(results)
+
+        return tuple(await asyncio.gather(*(_run_one(cmd) for cmd in commands)))
+
+    def close(self) -> None:
+        """释放底层 retriever 资源（如 embedder）。"""
+        if hasattr(self._retriever, "close"):
+            self._retriever.close()
 
 
 def build_agent_query_service(
