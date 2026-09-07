@@ -120,6 +120,7 @@ class OnceQueryResponse(GatewayModel):
     query_type: QueryType
     documents: list[ApiDocumentResult]
     total: int = Field(ge=0)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BatchQueryResult(GatewayModel):
@@ -133,6 +134,7 @@ class BatchQueryResult(GatewayModel):
     documents: list[ApiDocumentResult] = Field(default_factory=list)
     total: int = Field(default=0, ge=0)
     error: GatewayError | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BatchQueryResponse(GatewayModel):

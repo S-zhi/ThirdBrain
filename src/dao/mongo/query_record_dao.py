@@ -93,6 +93,7 @@ class QueryRecord(QueryRecordModel):
     finished_at: datetime
     duration_ms: int = Field(ge=0)
     schema_version: int = 1
+    warnings: list[str] = Field(default_factory=list)
 
 
 class QueryRecordDAO:

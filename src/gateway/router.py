@@ -134,6 +134,7 @@ def _to_batch_result_response(
         documents=documents,
         total=total,
         error=error,
+        warnings=list(result.warnings),
     )
 
 
@@ -170,6 +171,7 @@ async def query_once(
         query_type=payload.query_type,
         documents=[_to_document_response(document) for document in result.documents],
         total=result.total,
+        warnings=list(result.warnings),
     )
 
 

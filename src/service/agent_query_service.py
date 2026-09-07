@@ -122,6 +122,7 @@ class AgentQueryResult:
     record_status: RecordPersistenceStatus
     documents: tuple[AgentApiDocument, ...]
     total: int
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +142,7 @@ class BatchAgentQueryResult:
     record_status: RecordPersistenceStatus
     result: AgentQueryResult | None = None
     error: AgentQueryItemError | None = None
+    warnings: tuple[str, ...] = ()
 
 
 class AgentQueryExecutionError(RuntimeError):
@@ -244,21 +246,31 @@ def _to_agent_document(
     result: SearchResult,
     *,
     include_score: bool,
-) -> AgentApiDocument:
-    """将 Zvec 命中映射为稳定的机器可消费文档结构。"""
+) -> AgentApiDocument | None:
+    """将 Zvec 命中映射为稳定的机器可消费文档结构；缺字段或类型非法返回 None。"""
     fields: dict[str, object] = dict(result.fields)
     api_id = _string_field(fields, "api_id") or result.doc_id
     name = _string_field(fields, "name")
     namespace = _string_field(fields, "namespace")
     version = _string_field(fields, "version")
     if not name or not namespace or not version:
-        raise ValueError("Zvec 查询结果缺少 name、namespace 或 version")
+        logger.warning(
+            "agent_query.doc_missing_fields doc_id=%s "
+            "name=%r namespace=%r version=%r",
+            result.doc_id, name, namespace, version,
+        )
+        return None
 
     ingested_at = fields.get("ingested_at", 0)
     if isinstance(ingested_at, bool):
         ingested_at = int(ingested_at)
     if not isinstance(ingested_at, int):
-        raise TypeError("Zvec 查询结果 ingested_at 类型非法")
+        logger.warning(
+            "agent_query.doc_invalid_ingested_at doc_id=%s "
+            "ingested_at=%r",
+            result.doc_id, ingested_at,
+        )
+        return None
 
     return AgentApiDocument(
         api_id=api_id,
@@ -381,6 +393,7 @@ class AgentQueryService:
         started_at: datetime,
         finished_at: datetime,
         duration_ms: int,
+        warnings: tuple[str, ...] = (),
     ) -> QueryRecord:
         """构造成功或失败的完整终态查询记录。"""
         return QueryRecord(
@@ -406,6 +419,7 @@ class AgentQueryService:
             started_at=started_at,
             finished_at=finished_at,
             duration_ms=duration_ms,
+            warnings=list(warnings),
         )
 
     async def query_once(
@@ -420,6 +434,7 @@ class AgentQueryService:
         query_record_id = str(uuid4())
         started_at = datetime.now(UTC)
         started = time.perf_counter()
+        warnings_list: list[str] = []
         try:
             if command.query_type == AgentQueryType.NAME:
                 raw_results = await asyncio.to_thread(self._retriever.query_name, command)
@@ -427,9 +442,16 @@ class AgentQueryService:
             else:
                 raw_results = await asyncio.to_thread(self._retriever.query_semantic, command)
                 include_score = True
-            documents = tuple(
-                _to_agent_document(result, include_score=include_score) for result in raw_results
-            )
+
+            documents_list = []
+            for result in raw_results:
+                doc = _to_agent_document(result, include_score=include_score)
+                if doc is not None:
+                    documents_list.append(doc)
+            documents = tuple(documents_list)
+
+            if len(documents) < len(raw_results):
+                warnings_list.append("ZRES_HIT_DROPPED_DUE_TO_MISSING_FIELDS")
         except Exception as error:
             finished_at = datetime.now(UTC)
             duration_ms = int((time.perf_counter() - started) * 1000)
@@ -445,6 +467,7 @@ class AgentQueryService:
                 started_at=started_at,
                 finished_at=finished_at,
                 duration_ms=duration_ms,
+                warnings=(),
             )
             record_status = await self._persist_record(record)
             logger.warning(
@@ -452,6 +475,7 @@ class AgentQueryService:
                 query_record_id,
                 command.query_type.value,
                 type(error).__name__,
+                exc_info=True,
             )
             raise AgentQueryExecutionError(
                 "查询失败",
@@ -473,6 +497,7 @@ class AgentQueryService:
             started_at=started_at,
             finished_at=finished_at,
             duration_ms=duration_ms,
+            warnings=tuple(warnings_list),
         )
         record_status = await self._persist_record(record)
         self._record_heatmap_hits(documents)
@@ -481,6 +506,7 @@ class AgentQueryService:
             record_status=record_status,
             documents=documents,
             total=len(documents),
+            warnings=tuple(warnings_list),
         )
 
     async def query_batch(
@@ -519,6 +545,7 @@ class AgentQueryService:
                     query_record_id=result.query_record_id,
                     record_status=result.record_status,
                     result=result,
+                    warnings=result.warnings,
                 )
             )
         return tuple(results)
