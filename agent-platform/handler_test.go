@@ -137,7 +137,7 @@ func TestExecuteKnowledgeAssistCapsCallerDeadlineAtCapabilityLimit(t *testing.T)
 	if response.Status != agentplatform.AssistStatus_COMPLETED {
 		t.Fatalf("status = %v", response.Status)
 	}
-	if got := tool.deadline.Sub(startedAt); got <= 0 || got > 10*time.Second+time.Second {
+	if got := tool.deadline.Sub(startedAt); got <= 0 || got > 30*time.Second+time.Second {
 		t.Fatalf("effective deadline = %s, want at most capability limit", got)
 	}
 }

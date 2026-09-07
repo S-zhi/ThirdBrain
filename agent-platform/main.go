@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 
+	agentservice "github.com/S-zhi/ThirdBrain/agent-platform/internal/agent"
+	coreapidoc "github.com/S-zhi/ThirdBrain/agent-platform/internal/apidoc"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/config"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/coredata"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/gatewayauth"
@@ -28,9 +31,31 @@ func main() {
 	dataClient := coredata.NewClient(
 		cfg.CoreDataBaseURL,
 		cfg.CoreDataAPIKey,
-		cfg.CoreDataHTTPTimeout,
+		cfg.CapabilityTimeout,
 	)
-	handler := NewAgentPlatformServiceImpl(workflow.NewKnowledgeAssistWorkflow(dataClient))
+	var apiDocAgent *agentservice.Service
+	if cfg.AgentModelAPIKey != "" && cfg.AgentModelName != "" {
+		chatModel, modelErr := agentservice.NewOpenAIModel(context.Background(), agentservice.OpenAIModelConfig{
+			APIKey:  cfg.AgentModelAPIKey,
+			BaseURL: cfg.AgentModelBaseURL,
+			Model:   cfg.AgentModelName,
+			Timeout: cfg.CapabilityTimeout,
+		})
+		if modelErr != nil {
+			fmt.Fprintln(os.Stderr, "agent-platform LLM configuration error:", modelErr)
+			os.Exit(1)
+		}
+		apiDocAgent, modelErr = agentservice.NewAPIDocumentService(context.Background(), chatModel, coreapidoc.New(dataClient))
+		if modelErr != nil {
+			fmt.Fprintln(os.Stderr, "agent-platform Agent initialization error:", modelErr)
+			os.Exit(1)
+		}
+	}
+	handler := NewAgentPlatformServiceImplWithAgent(
+		workflow.NewKnowledgeAssistWorkflow(dataClient),
+		cfg.CapabilityTimeout,
+		apiDocAgent,
+	)
 	svr := agentplatform.NewServer(
 		handler,
 		server.WithServiceAddr(address),

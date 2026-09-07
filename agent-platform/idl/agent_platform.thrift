@@ -42,6 +42,49 @@ struct ExecuteKnowledgeAssistResponse {
   7: optional string error_message
 }
 
+struct CapabilityRequest {
+  1: string capability_id
+  2: string payload_json
+  3: optional string trace_id
+  4: optional string caller
+  5: optional i32 timeout_ms
+}
+
+struct CapabilityError {
+  1: string code
+  2: string message
+  3: bool retryable
+  4: optional string cause_ref
+}
+
+struct CapabilityResponse {
+  1: string capability_id
+  2: string trace_id
+  3: string status
+  4: optional string result_json
+  5: i64 elapsed_ms
+  6: optional CapabilityError error
+}
+
+struct CapabilityDescriptor {
+  1: string capability_id
+  2: string name
+  3: string module
+  4: string version
+  5: string status
+  6: string risk_level
+  7: string invocation_mode
+  8: string execution_mode
+  9: list<string> dependencies
+  10: i32 timeout_default_ms
+  11: i32 timeout_max_ms
+  12: bool client_retryable
+  13: string input_schema_ref
+  14: string output_schema_ref
+}
+
 service AgentPlatformService {
   ExecuteKnowledgeAssistResponse ExecuteKnowledgeAssist(1: ExecuteKnowledgeAssistRequest request)
+  list<CapabilityDescriptor> Discover(1: bool read_only)
+  CapabilityResponse Invoke(1: CapabilityRequest request)
 }

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "trace_id", "tool_calls", "elapsed_ms"],
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "abstained", "failed"]},
+    "answer": {"type": "string"},
+    "citations": {"type": "array"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "tool_calls": {"type": "integer", "minimum": 0, "maximum": 1},
+    "elapsed_ms": {"type": "integer", "minimum": 0},
+    "trace_id": {"type": "string", "minLength": 1}
+  }
+}

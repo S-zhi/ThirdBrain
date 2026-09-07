@@ -2,8 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"strings"
 	"time"
 
+	agentservice "github.com/S-zhi/ThirdBrain/agent-platform/internal/agent"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/capability"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/coredata"
 	"github.com/S-zhi/ThirdBrain/agent-platform/internal/workflow"
@@ -13,6 +19,8 @@ import (
 // AgentPlatformServiceImpl implements the last service interface defined in the IDL.
 type AgentPlatformServiceImpl struct {
 	workflow *workflow.KnowledgeAssistWorkflow
+	agent    *agentservice.Service
+	timeout  time.Duration
 }
 
 // NewAgentPlatformServiceImpl constructs the Kitex handler without granting it
@@ -20,7 +28,195 @@ type AgentPlatformServiceImpl struct {
 func NewAgentPlatformServiceImpl(
 	knowledgeWorkflow *workflow.KnowledgeAssistWorkflow,
 ) *AgentPlatformServiceImpl {
-	return &AgentPlatformServiceImpl{workflow: knowledgeWorkflow}
+	return &AgentPlatformServiceImpl{workflow: knowledgeWorkflow, timeout: capability.APIDocAgentV1().Timeout}
+}
+
+// NewAgentPlatformServiceImplWithTimeout wires the single process-wide
+// capability deadline into both handler paths. The existing constructor keeps
+// its default for backwards-compatible tests and embedders.
+func NewAgentPlatformServiceImplWithTimeout(
+	knowledgeWorkflow *workflow.KnowledgeAssistWorkflow,
+	timeout time.Duration,
+) *AgentPlatformServiceImpl {
+	service := NewAgentPlatformServiceImpl(knowledgeWorkflow)
+	if timeout > 0 {
+		service.timeout = timeout
+	}
+	return service
+}
+
+// NewAgentPlatformServiceImplWithAgent wires the Eino Agent as the public
+// capability execution path. The legacy deterministic workflow remains
+// available for the existing ExecuteKnowledgeAssist RPC.
+func NewAgentPlatformServiceImplWithAgent(
+	knowledgeWorkflow *workflow.KnowledgeAssistWorkflow,
+	timeout time.Duration,
+	agent *agentservice.Service,
+) *AgentPlatformServiceImpl {
+	service := NewAgentPlatformServiceImplWithTimeout(knowledgeWorkflow, timeout)
+	service.agent = agent
+	return service
+}
+
+// Discover returns the statically registered, read-only capabilities.
+func (service *AgentPlatformServiceImpl) Discover(_ context.Context, readOnly bool) ([]*agentplatform.CapabilityDescriptor, error) {
+	if !readOnly {
+		return []*agentplatform.CapabilityDescriptor{}, nil
+	}
+	descriptor := capability.APIDocAgentV1()
+	return []*agentplatform.CapabilityDescriptor{{
+		CapabilityId: descriptor.ID, Name: "API 文档检索（LLM Wiki 信息 Loop 查找）", Module: descriptor.Category,
+		Version: descriptor.Version, Status: "available", RiskLevel: descriptor.Risk,
+		InvocationMode: "online", ExecutionMode: "sync", Dependencies: []string{descriptor.Dependency},
+		TimeoutDefaultMs: 30000, TimeoutMaxMs: 30000, ClientRetryable: true,
+		InputSchemaRef: descriptor.InputSchema, OutputSchemaRef: descriptor.OutputSchema,
+	}}, nil
+}
+
+// Invoke dispatches the capability without exposing any data-store client.
+func (service *AgentPlatformServiceImpl) Invoke(ctx context.Context, request *agentplatform.CapabilityRequest) (*agentplatform.CapabilityResponse, error) {
+	startedAt := time.Now()
+	response := &agentplatform.CapabilityResponse{CapabilityId: "", Status: "failure"}
+	if request != nil {
+		response.CapabilityId = request.CapabilityId
+	}
+	response.TraceId = requestTraceID(request)
+	defer func() { response.ElapsedMs = time.Since(startedAt).Milliseconds() }()
+	if request == nil || (request.CapabilityId != capability.APIDocAgentV1ID && request.CapabilityId != capability.APIDocRetrievalV1ID) {
+		response.Error = capabilityError("INVALID_REQUEST", "unknown or missing capability", false)
+		return response, nil
+	}
+	if service.agent == nil {
+		response.Error = capabilityError("CAPABILITY_UNAVAILABLE", "API document retrieval is unavailable", false)
+		return response, nil
+	}
+	deadline := service.timeout
+	if deadline <= 0 {
+		deadline = capability.APIDocAgentV1().Timeout
+	}
+	if request.IsSetTimeoutMs() {
+		if request.GetTimeoutMs() <= 0 || time.Duration(request.GetTimeoutMs())*time.Millisecond > deadline {
+			response.Error = capabilityError("INVALID_REQUEST", "timeout_ms exceeds the configured capability timeout", false)
+			return response, nil
+		}
+		deadline = time.Duration(request.GetTimeoutMs()) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	payload, err := decodeAgentPayload(request.PayloadJson)
+	if err != nil {
+		response.Error = capabilityError("INVALID_REQUEST", "request violates the capability contract", false)
+		return response, nil
+	}
+	result, err := service.agent.Run(ctx, agentservice.RunRequest{
+		InvocationID: response.TraceId,
+		TraceID:      response.TraceId,
+		Caller:       request.GetCaller(),
+		Query:        payload.Query,
+		Scope: coredata.RetrievalScope{
+			WikiID:    payload.WikiID,
+			Namespace: payload.Namespace,
+			Version:   payload.Version,
+			Language:  payload.Language,
+		},
+		MaxResults: payload.MaxResults,
+		Deadline:   deadline,
+	})
+	if err != nil {
+		code, retryable := classifyCapabilityError(ctx, err)
+		response.Error = capabilityError(code, sanitizedMessage(code), retryable)
+		return response, nil
+	}
+	resultJSONBytes, err := json.Marshal(result)
+	if err != nil {
+		response.Error = capabilityError("INTERNAL_ERROR", "capability execution failed", false)
+		return response, nil
+	}
+	resultJSON := string(resultJSONBytes)
+	response.Status = "success"
+	response.ResultJson = &resultJSON
+	return response, nil
+}
+
+type apiDocAgentPayload struct {
+	Query          string `json:"query"`
+	WikiID         string `json:"wiki_id"`
+	Namespace      string `json:"namespace"`
+	Version        string `json:"version"`
+	Language       string `json:"language,omitempty"`
+	MaxResults     int    `json:"max_results,omitempty"`
+	ResponseFormat string `json:"response_format,omitempty"`
+}
+
+func decodeAgentPayload(payload string) (apiDocAgentPayload, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &fields); err != nil {
+		return apiDocAgentPayload{}, err
+	}
+	for field := range fields {
+		switch field {
+		case "query", "wiki_id", "namespace", "version", "language", "max_results", "response_format":
+		default:
+			return apiDocAgentPayload{}, errors.New("unknown API document Agent field")
+		}
+	}
+	var request apiDocAgentPayload
+	if err := json.Unmarshal([]byte(payload), &request); err != nil {
+		return apiDocAgentPayload{}, err
+	}
+	if request.MaxResults == 0 {
+		request.MaxResults = 5
+	}
+	if strings.TrimSpace(request.Query) == "" || strings.TrimSpace(request.WikiID) == "" || strings.TrimSpace(request.Namespace) == "" || strings.TrimSpace(request.Version) == "" || request.MaxResults < 1 || request.MaxResults > 20 {
+		return apiDocAgentPayload{}, errors.New("invalid API document Agent payload")
+	}
+	if request.ResponseFormat != "" && request.ResponseFormat != "answer_with_citations" {
+		return apiDocAgentPayload{}, errors.New("unsupported response format")
+	}
+	return request, nil
+}
+
+func requestTraceID(request *agentplatform.CapabilityRequest) string {
+	if request != nil && strings.TrimSpace(request.GetTraceId()) != "" {
+		return request.GetTraceId()
+	}
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err == nil {
+		bytes[6] = (bytes[6] & 0x0f) | 0x40
+		bytes[8] = (bytes[8] & 0x3f) | 0x80
+		hexValue := hex.EncodeToString(bytes[:])
+		return hexValue[:8] + "-" + hexValue[8:12] + "-" + hexValue[12:16] + "-" + hexValue[16:20] + "-" + hexValue[20:]
+	}
+	return "trace-generation-failed"
+}
+
+func capabilityError(code, message string, retryable bool) *agentplatform.CapabilityError {
+	return &agentplatform.CapabilityError{Code: code, Message: message, Retryable: retryable}
+}
+
+func classifyCapabilityError(ctx context.Context, err error) (string, bool) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "TIMEOUT", true
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "invalid request") || strings.Contains(message, "required") || strings.Contains(message, "must ") || strings.Contains(message, "sensitive") {
+		return "INVALID_REQUEST", false
+	}
+	if strings.Contains(message, "401") || strings.Contains(message, "403") {
+		return "UNAUTHORIZED", false
+	}
+	if strings.Contains(message, "unavailable") || strings.Contains(message, "connection") || strings.Contains(message, "timeout") || strings.Contains(message, "503") {
+		return "DEPENDENCY_FAILED", true
+	}
+	return "INTERNAL_ERROR", false
+}
+
+func sanitizedMessage(code string) string {
+	messages := map[string]string{"INVALID_REQUEST": "request violates the capability contract", "TIMEOUT": "downstream retrieval timed out", "UNAUTHORIZED": "downstream authorization failed", "DEPENDENCY_FAILED": "retrieval dependency is unavailable", "INTERNAL_ERROR": "capability execution failed"}
+	if message, ok := messages[code]; ok {
+		return message
+	}
+	return "capability execution failed"
 }
 
 // ExecuteKnowledgeAssist implements the AgentPlatformServiceImpl interface.
