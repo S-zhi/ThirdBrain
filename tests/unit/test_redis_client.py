@@ -77,3 +77,71 @@ async def test_mget_int_not_connected(mock_settings):
     db = RedisDatabase(mock_settings)
     results = await db.mget_int(["key1", "key2"])
     assert results == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_incr_pipeline_success(mock_settings):
+    from unittest.mock import MagicMock
+
+    db = RedisDatabase(mock_settings)
+    mock_client = AsyncMock()
+    db._client = mock_client
+
+    mock_pipeline = AsyncMock()
+    mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
+    mock_pipeline.__aexit__ = AsyncMock(return_value=None)
+    mock_pipeline.incrby = MagicMock()
+    mock_pipeline.execute = AsyncMock(return_value=[1, 2, None, "3", "invalid"])
+
+    mock_client.pipeline = MagicMock(return_value=mock_pipeline)
+
+    items = [("key1", 1), ("key2", 1), ("key3", 1), ("key4", 1), ("key5", 1)]
+    results = await db.incr_pipeline(items)
+
+    assert results == [1, 2, None, 3, None]
+    mock_pipeline.incrby.assert_any_call("key1", 1)
+    mock_pipeline.incrby.assert_any_call("key5", 1)
+
+
+@pytest.mark.asyncio
+async def test_incr_pipeline_empty(mock_settings):
+    db = RedisDatabase(mock_settings)
+    results = await db.incr_pipeline([])
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_incr_pipeline_disabled(mock_settings):
+    disabled_settings = RedisSettings(
+        enabled=False,
+        url="redis://localhost:6379",
+        max_connections=10,
+        socket_timeout=5.0,
+        socket_connect_timeout=5.0,
+        key_prefix="hitNumber",
+    )
+    db = RedisDatabase(disabled_settings)
+    results = await db.incr_pipeline([("key1", 1)])
+    assert results == [None]
+
+
+@pytest.mark.asyncio
+async def test_incr_pipeline_error(mock_settings):
+    from unittest.mock import MagicMock
+
+    from redis.exceptions import ConnectionError
+
+    db = RedisDatabase(mock_settings)
+    mock_client = AsyncMock()
+    db._client = mock_client
+
+    mock_pipeline = AsyncMock()
+    mock_pipeline.__aenter__ = AsyncMock(return_value=mock_pipeline)
+    mock_pipeline.__aexit__ = AsyncMock(return_value=None)
+    mock_pipeline.incrby = MagicMock()
+    mock_pipeline.execute = AsyncMock(side_effect=ConnectionError("conn error"))
+
+    mock_client.pipeline = MagicMock(return_value=mock_pipeline)
+
+    results = await db.incr_pipeline([("key1", 1)])
+    assert results == [None]

@@ -107,7 +107,7 @@ class RedisDatabase:
     async def incr(self, key: str, amount: int = 1) -> int | None:
         """对 key 执行 INCRBY；失败时返回 None。
 
-        ``key`` 通常由 ``build_hit_key`` 构造，调用方无需关心前缀。
+        ``key`` 通常由 ``build_hit_key`` 构造，调用方无需关心前缀.
         """
         if not self._can_run():
             return None
@@ -121,6 +121,36 @@ class RedisDatabase:
                 type(error).__name__,
             )
             return None
+
+    async def incr_pipeline(self, items: list[tuple[str, int]]) -> list[int | None]:
+        """用 pipeline 批量执行 INCRBY，返回每条的新值。"""
+        if not items:
+            return []
+        if not self._can_run():
+            return [None] * len(items)
+        try:
+            async with self.client.pipeline(transaction=False) as pipe:
+                for key, amount in items:
+                    pipe.incrby(key, amount)
+                raw_values = await pipe.execute()
+        except (RedisError, OSError) as error:
+            logger.warning(
+                "redis.incr_pipeline_failed count=%d error_type=%s",
+                len(items),
+                type(error).__name__,
+            )
+            return [None] * len(items)
+
+        result: list[int | None] = []
+        for raw in raw_values:
+            if raw is None:
+                result.append(None)
+                continue
+            try:
+                result.append(int(raw))
+            except TypeError, ValueError:
+                result.append(None)
+        return result
 
     async def mget_int(self, keys: list[str]) -> list[int | None]:
         """批量 GET。缺失或失败对应位置返回 None。
@@ -147,7 +177,7 @@ class RedisDatabase:
                 continue
             try:
                 result.append(int(raw))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 result.append(None)
         return result
 

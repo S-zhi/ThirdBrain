@@ -140,15 +140,18 @@ class HeatmapCounter:
         if not collection or not self._redis.is_enabled or not self._redis.is_connected:
             return 0
         prefix = self._redis.settings.key_prefix
-        success = 0
+        valid_items: list[tuple[str, int]] = []
         for api_id in api_ids:
             if not api_id:
                 continue
             key = build_hit_key(prefix, collection, api_id)
-            new_value = await self._redis.incr(key, 1)
-            if new_value is not None:
-                success += 1
-        return success
+            valid_items.append((key, 1))
+
+        if not valid_items:
+            return 0
+
+        results = await self._redis.incr_pipeline(valid_items)
+        return sum(1 for v in results if v is not None)
 
     # ---- 读取 ----
 
