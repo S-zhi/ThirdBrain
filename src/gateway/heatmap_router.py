@@ -2,8 +2,7 @@
 
 观测旁路：Redis 不可用时**不**报错，返回 ``200`` + 空 data +
 ``disabled=true``，前端据此显示"功能未启用"占位。
-不在 router 层加 auth（前端直接调，方便 demo）；如需鉴权后续加
-``Depends(require_service_auth)`` 即可。
+使用统一服务鉴权依赖 ``require_service_auth``，确保未授权请求不会泄露命中数据。
 """
 
 from __future__ import annotations
@@ -13,11 +12,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
+from src.gateway.auth import require_service_auth
 from src.service.heatmap_counter import HeatmapCounter, HeatmapEntry
 
 router = APIRouter(
     prefix="/api/v1/heatmap",
     tags=["Heatmap"],
+    dependencies=[Depends(require_service_auth)],
 )
 
 #: target_url 占位符。后续替换为该 API 在 Link Graph Explorer 中的
