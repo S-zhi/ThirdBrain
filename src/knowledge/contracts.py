@@ -67,6 +67,7 @@ class KnowledgeRepository(Protocol):
         重建索引，因此这里返回不可变的完整 Revision。
         """
 
+
     async def stage(
         self,
         operation_id: str,
