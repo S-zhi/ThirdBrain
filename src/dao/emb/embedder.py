@@ -10,16 +10,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import Counter
 from typing import Literal
 
+import httpx
+import requests
+
 from config import get_dashscope_api_key
-from src.dao.emb.exceptions import EmbedderError
+from src.dao.emb.exceptions import EmbedderAuthError, EmbedderError, EmbedderTimeoutError
 
 # 可选依赖：sentence-transformers（仅 LocalEmbedder 用）
 try:
@@ -271,22 +276,112 @@ class BailianEmbedder(Embedder):
                 )
                 for mode in ("query", "document")
             }
-        except (ImportError, TypeError, ValueError) as e:
+        except Exception as e:
             raise EmbedderError(f"Zvec Qwen embedding 初始化失败: {e}") from e
+
+    def _is_auth_error(self, e: Exception) -> bool:
+        if isinstance(e, PermissionError):
+            return True
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("api-key", "apikey", "unauthorized", "401", "auth")):
+            return True
+        cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+        if cause and isinstance(cause, Exception):
+            return self._is_auth_error(cause)
+        return False
+
+    def _is_timeout_error(self, e: Exception) -> bool:
+        if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        if hasattr(httpx, "TimeoutException") and isinstance(e, httpx.TimeoutException):
+            return True
+        if hasattr(requests.exceptions, "Timeout") and isinstance(e, requests.exceptions.Timeout):
+            return True
+        err_str = str(e).lower()
+        if any(kw in err_str for kw in ("timeout", "timed out")):
+            return True
+        cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+        if cause and isinstance(cause, Exception):
+            return self._is_timeout_error(cause)
+        return False
+
+    def _is_retryable(self, e: Exception) -> bool:
+        retryable_types = (
+            ConnectionError,
+            OSError,
+            asyncio.TimeoutError,
+            TimeoutError,
+        )
+        if isinstance(e, retryable_types):
+            return True
+        if hasattr(httpx, "HTTPError") and isinstance(e, httpx.HTTPError):
+            return True
+        if hasattr(requests.exceptions, "RequestException") and isinstance(e, requests.exceptions.RequestException):
+            return True
+
+        # Check nested cause
+        cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+        if cause and isinstance(cause, Exception) and self._is_retryable(cause):
+            return True
+
+        # Check for typical keywords in string representation
+        err_str = str(e).lower()
+        return bool(any(kw in err_str for kw in ("timeout", "timed out", "connect", "connection", "network", "unreachable", "host")))
+
+    def _run_with_retry(self, prefix: str, func, *args, **kwargs):
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exc = e
+                # Check for Auth/API-key failure
+                if self._is_auth_error(e):
+                    raise EmbedderAuthError(
+                        f"Qwen API key 无效: {e}", code="EMBED_AUTH_FAILED"
+                    ) from e
+
+                # Check if it is a retryable exception
+                if self._is_retryable(e):
+                    if attempt < self._max_retries - 1:
+                        # Exponential backoff
+                        time.sleep(2 ** attempt)
+                        continue
+                    # Retries exhausted
+                    if self._is_timeout_error(e):
+                        raise EmbedderTimeoutError(
+                            f"{prefix} 超时 (attempt {attempt + 1}): {e}",
+                            code="EMBED_TIMEOUT",
+                        ) from e
+                    raise EmbedderError(
+                        f"{prefix} 网络失败 (attempt {attempt + 1}): {e}",
+                        code="EMBED_NETWORK_FAILED",
+                    ) from e
+
+                # Check for invalid input
+                if isinstance(e, (TypeError, ValueError)):
+                    raise EmbedderError(
+                        f"{prefix} 参数错: {e}", code="EMBED_INVALID_INPUT"
+                    ) from e
+
+                # General fallback: all other unexpected exceptions
+                raise EmbedderError(
+                    f"{prefix} 未知失败: {type(e).__name__}: {e}",
+                    code="EMBED_UNKNOWN_FAILED",
+                ) from e
+        # Defensive fallback
+        raise EmbedderError(
+            f"{prefix} 重试 {self._max_retries} 次仍失败: {last_exc}",
+            code="EMBED_NETWORK_FAILED",
+        ) from last_exc
 
     def embed_dense(self, text: str, mode: Mode = "document") -> list[float]:
         """调用对应 mode 的 Zvec QwenDenseEmbedding 生成稠密向量。"""
-        try:
-            return self._dense[mode].embed(text)
-        except (TypeError, ValueError, RuntimeError) as e:
-            raise EmbedderError(f"Qwen dense embedding 失败: {e}") from e
+        return self._run_with_retry("Qwen dense embedding", self._dense[mode].embed, text)
 
     def embed_sparse(self, text: str, mode: Mode = "document") -> dict[int, float]:
         """调用对应 mode 的 Zvec QwenSparseEmbedding 生成稀疏向量。"""
-        try:
-            return self._sparse[mode].embed(text)
-        except (TypeError, ValueError, RuntimeError) as e:
-            raise EmbedderError(f"Qwen sparse embedding 失败: {e}") from e
+        return self._run_with_retry("Qwen sparse embedding", self._sparse[mode].embed, text)
 
     def fit_sparse(self, corpus: list[str]) -> None:
         """Qwen sparse 无需本地拟合，保留 no-op 以兼容统一接口。"""

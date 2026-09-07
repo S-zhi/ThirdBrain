@@ -37,6 +37,21 @@ class EmbedderError(EmbError):
     - 返回的向量维度与配置不匹配。
     - :class:`LocalEmbedder` 构造时 sentence-transformers 缺失。
     """
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class EmbedderTimeoutError(EmbedderError):
+    """Embedding 调用超时。"""
+    def __init__(self, message: str, code: str | None = "EMBED_TIMEOUT") -> None:
+        super().__init__(message, code=code)
+
+
+class EmbedderAuthError(EmbedderError):
+    """Embedding API 鉴权失败。"""
+    def __init__(self, message: str, code: str | None = "EMBED_AUTH_FAILED") -> None:
+        super().__init__(message, code=code)
 
 
 class SchemaMismatchError(EmbError):
