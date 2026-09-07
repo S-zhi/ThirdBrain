@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator, Iterable
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from pymongo import ASCENDING, DESCENDING, UpdateOne
 from pymongo.errors import PyMongoError
@@ -83,8 +86,33 @@ class MongoRelationGraphStore:
         from src.dao.mongo._index_helper import create_index_if_missing
 
         collection = self._collection()
+
+        # Check and drop old indexes without partial filter first to avoid drift RuntimeError
+        try:
+            existing_iter = await collection.list_indexes()
+            existing = {idx["name"]: idx async for idx in existing_iter}
+        except PyMongoError:
+            # If the database or collection doesn't exist yet, it'll raise NamespaceNotFound (code 26),
+            # which we can treat as empty (same as create_index_if_missing).
+            existing = {}
+
+        expected_filter = {"is_broken": False}
         for keys, name in definitions:
-            await create_index_if_missing(collection, keys, name=name)
+            if name in existing:
+                existing_idx = existing[name]
+                existing_filter = existing_idx.get("partialFilterExpression")
+                if existing_filter != expected_filter:
+                    logger.warning(
+                        "Index %s on %s has different partial filter: existing=%s, expected=%s. Dropping index for recreation.",
+                        name, collection.name, existing_filter, expected_filter
+                    )
+                    try:
+                        await collection.drop_index(name)
+                    except PyMongoError as exc:
+                        logger.warning("Failed to drop index %s: %s", name, exc)
+
+        for keys, name in definitions:
+            await create_index_if_missing(collection, keys, name=name, partial_filter=expected_filter)
 
     async def upsert_edges(self, edges: Iterable[GraphEdge]) -> int:
         """批量 upsert 边。**硬过滤**：所有 ``is_broken=True`` 的边在写入前丢弃。
@@ -164,7 +192,12 @@ class MongoRelationGraphStore:
         started = time.perf_counter()
         try:
             cursor = collection.find(
-                {"wiki_id": wiki_id, "namespace": namespace, "version": version}
+                {
+                    "wiki_id": wiki_id,
+                    "namespace": namespace,
+                    "version": version,
+                    "is_broken": False,
+                }
             )
             docs = [doc async for doc in cursor]
         except PyMongoError as error:
@@ -205,7 +238,12 @@ class MongoRelationGraphStore:
         started = time.perf_counter()
         try:
             cursor = collection.find(
-                {"wiki_id": wiki_id, "namespace": namespace, "version": version}
+                {
+                    "wiki_id": wiki_id,
+                    "namespace": namespace,
+                    "version": version,
+                    "is_broken": False,
+                }
             ).sort("edge_id", ASCENDING)
             batch: list[GraphEdge] = []
             total_yielded = 0
@@ -255,6 +293,7 @@ class MongoRelationGraphStore:
                         "namespace": namespace,
                         "version": version,
                         "source_artifact_id": source_artifact_id,
+                        "is_broken": False,
                     }
                 )
                 .sort("strength_score", DESCENDING)
@@ -287,7 +326,12 @@ class MongoRelationGraphStore:
         started = time.perf_counter()
         try:
             count = await collection.count_documents(
-                {"wiki_id": wiki_id, "namespace": namespace, "version": version}
+                {
+                    "wiki_id": wiki_id,
+                    "namespace": namespace,
+                    "version": version,
+                    "is_broken": False,
+                }
             )
         except PyMongoError as error:
             log_op(
@@ -327,6 +371,7 @@ class MongoRelationGraphStore:
                         "namespace": namespace,
                         "version": version,
                         "target_artifact_id": target_artifact_id,
+                        "is_broken": False,
                     }
                 )
                 .sort("strength_score", DESCENDING)
@@ -424,6 +469,7 @@ class MongoRelationGraphStore:
             "wiki_id": wiki_id,
             "namespace": namespace,
             "version": version,
+            "is_broken": False,
             "$or": [
                 {"source_artifact_id": id_a, "target_artifact_id": id_b},
                 {"source_artifact_id": id_b, "target_artifact_id": id_a},
@@ -471,6 +517,7 @@ class MongoRelationGraphStore:
                     "source_artifact_id": target_id,
                     "target_artifact_id": source_id,
                     "relation_type": relation_type.value,
+                    "is_broken": False,
                 },
                 limit=1,
             )
